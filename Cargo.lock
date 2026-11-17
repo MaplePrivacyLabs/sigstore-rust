@@ -2278,6 +2278,7 @@ dependencies = [
  "tls_codec",
  "tokio",
  "tracing",
+ "url",
  "x509-cert",
 ]
 

@@ -1965,3 +1965,72 @@ fn test_certificate_checked_against_every_verified_timestamp() {
         "expected a certificate validity failure, got: {msg}"
     );
 }
+
+#[test]
+fn checkpoint_log_binding_is_off_by_default() {
+    assert!(!VerificationPolicy::any_identity().requires_checkpoint_log_binding());
+    assert!(VerificationPolicy::any_identity()
+        .require_checkpoint_log_binding()
+        .requires_checkpoint_log_binding());
+    let key = sigstore_types::DerPublicKey::new(vec![]);
+    assert!(!PublicKeyVerificationPolicy::new(key.clone()).requires_checkpoint_log_binding());
+    assert!(PublicKeyVerificationPolicy::new(key)
+        .require_checkpoint_log_binding()
+        .requires_checkpoint_log_binding());
+}
+
+#[test]
+fn checkpoint_log_binding_accepts_checkpoints_from_the_entry_log() {
+    // Rekor v2: the checkpoint is signed by the entry's log and carries its
+    // origin.
+    let bundle = Bundle::from_json(include_str!(
+        "../test_data/bundles/conda-attestation-rekor2.sigstore.json"
+    ))
+    .unwrap();
+    let artifact = include_bytes!("../test_data/bundles/signed-package-2.1.0-hb0f4dca_0.conda");
+    let policy = VerificationPolicy::any_identity().require_checkpoint_log_binding();
+    verify(artifact.as_slice(), &bundle, &policy, &staging_root()).unwrap();
+
+    // Rekor v1: the checkpoint is signed by the entry's log key.
+    let bundle = Bundle::from_json(COSIGN_V3_BLOB_BUNDLE).unwrap();
+    let artifact = include_bytes!("../test_data/bundles/cosign-v3-blob.txt");
+    let policy = VerificationPolicy::any_identity()
+        .require_issuer("https://github.com/login/oauth")
+        .require_checkpoint_log_binding();
+    verify(artifact, &bundle, &policy, &production_root()).unwrap();
+}
+
+#[test]
+fn checkpoint_log_binding_rejects_a_checkpoint_from_another_trusted_log() {
+    // Point a real Rekor v2 entry at a different log in the same trusted
+    // root. The log ID is not covered by the inclusion proof or checkpoint,
+    // so without the binding the entry still verifies.
+    let mut bundle_json: serde_json::Value = serde_json::from_str(include_str!(
+        "../test_data/bundles/conda-attestation-rekor2.sigstore.json"
+    ))
+    .unwrap();
+    let entry = &mut bundle_json["verificationMaterial"]["tlogEntries"][0];
+    assert_eq!(
+        entry["logId"]["keyId"],
+        "09OnDKEw7/hpZiYVPoTRzRbglHk0sylsUovegnRUlJY="
+    );
+    // log2025-alpha2.rekor.sigstage.dev
+    entry["logId"]["keyId"] = "KfSiSX2iRLyhK62SUVL47vVcqqRx/RAewpKJm8IdZTo=".into();
+    let bundle = Bundle::from_json(&bundle_json.to_string()).unwrap();
+    let artifact = include_bytes!("../test_data/bundles/signed-package-2.1.0-hb0f4dca_0.conda");
+
+    let lenient = VerificationPolicy::any_identity();
+    verify(artifact.as_slice(), &bundle, &lenient, &staging_root()).unwrap();
+
+    let strict = lenient.require_checkpoint_log_binding();
+    let err = verify(artifact.as_slice(), &bundle, &strict, &staging_root()).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            sigstore_verify::Error::TransparencyLog(
+                sigstore_verify::TransparencyLogError::Checkpoint(message)
+            ) if message.contains("does not match the entry's log \"log2025-alpha2.rekor.sigstage.dev\"")
+        ),
+        "unexpected error: {err}"
+    );
+}

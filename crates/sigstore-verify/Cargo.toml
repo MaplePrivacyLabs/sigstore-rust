@@ -29,6 +29,7 @@ rustls-webpki = { workspace = true }
 rustls-pki-types = { workspace = true }
 tracing = { workspace = true }
 futures-io = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
