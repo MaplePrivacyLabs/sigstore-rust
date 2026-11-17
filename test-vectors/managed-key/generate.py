@@ -189,16 +189,63 @@ def relog(entry, body, log, signers=None, origin=None):
 # ---------------------------------------------------------------------------
 
 
+# Language-neutral reason codes (README.md, "Reason codes"). Every rejection
+# carries one, so verifiers in other languages can assert the same reason
+# without matching this library's error messages. A library message maps to
+# its code by the substring below.
+LIBRARY_CODES = (
+    ("DSSE signature verification failed", "dsse-signature-invalid"),
+    ("inclusion proof verification failed", "inclusion-proof-invalid"),
+    ("bundle must have an inclusion proof", "inclusion-proof-missing"),
+    ("No valid Rekor signature found on checkpoint", "checkpoint-signature-invalid"),
+    ("No matching Rekor key found for checkpoint signature", "checkpoint-signature-invalid"),
+    ("checkpoint has no valid signature from the entry's log", "checkpoint-signature-invalid"),
+    ("does not match the entry's log", "checkpoint-origin-mismatch"),
+    ("Failed to verify timestamp signature", "timestamp-signature-invalid"),
+    ("CMS signer does not match any trusted TSA certificate", "timestamp-untrusted-authority"),
+    ("Timestamp message hash mismatch", "timestamp-message-mismatch"),
+    ("invalid type: null, expected a protobuf int64", "bundle-malformed"),
+    ("SET verification failed", "inclusion-promise-invalid"),
+    ("bundles must have an inclusion promise", "inclusion-promise-missing"),
+    ("do not match its", "tlog-key-details-mismatch"),
+    ("does not match key details", "tlog-digest-algorithm-mismatch"),
+    ("digest is 32 bytes, expected 48", "tlog-digest-malformed"),
+    ("artifact hash mismatch for hashedrekord entry", "tlog-digest-mismatch"),
+    ("public key in Rekor entry does not match managed key", "tlog-key-mismatch"),
+    ("DSSE signature in bundle does not match signature in Rekor entry", "tlog-signature-mismatch"),
+)
+
+# Profile clauses checked before library verification have their own codes. A
+# profile rejection caused by library verification (MK-7 timestamp failures,
+# MK-8) takes the code of the library error with checkpoint binding on.
+PROFILE_CODES = {
+    "only the v0.3 media type is accepted": "media-type-unsupported",
+    "duplicate JSON keys are rejected": "duplicate-json-key",
+    "conflicting content variants are rejected": "conflicting-oneof",
+    "exactly one log entry is required": "tlog-entry-count",
+    "Rekor v1 entries are rejected": "tlog-entry-kind",
+    "no integrated time is allowed": "integrated-time-present",
+    "no integrated time field is allowed": "integrated-time-present",
+    "no inclusion promise is allowed": "inclusion-promise-present",
+    "exactly one timestamp is required": "timestamp-count",
+}
+
+
 def accept():
     return {"result": "accept"}
 
 
 def reject(error, message):
-    return {"result": "reject", "error": error, "message": message}
+    codes = [code for text, code in LIBRARY_CODES if text in message]
+    assert len(set(codes)) == 1, f"no single reason code for {message!r}"
+    return {"result": "reject", "error": error, "message": message, "code": codes[0]}
 
 
 def profile_reject(clause, reason):
-    return {"result": "reject", "clause": clause, "reason": reason}
+    expected = {"result": "reject", "clause": clause, "reason": reason}
+    if reason in PROFILE_CODES:
+        expected["code"] = PROFILE_CODES[reason]
+    return expected
 
 
 class Corpus:
@@ -222,6 +269,9 @@ class Corpus:
         if profile is None:
             profile = accept() if library["result"] == "accept" and binding["result"] == "accept" else None
         assert profile is not None, f"{vid}: profile expectation required"
+        if profile["result"] == "reject" and "code" not in profile:
+            assert binding["result"] == "reject", f"{vid}: profile reason needs a library rejection"
+            profile = {**profile, "code": binding["code"]}
         self.vectors.append({
             "id": vid,
             "description": description,
