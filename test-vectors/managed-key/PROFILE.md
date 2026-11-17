@@ -26,4 +26,7 @@ predicate fields) belongs to the application and is not part of this profile.
 | MK-8 | **Library verification.** The bundle verifies with `PublicKeyVerificationPolicy::new(approved_key)` with transparency log verification on and `require_checkpoint_log_binding()`. That covers the DSSE signature, the binding of the log entry's key, signature and digest (including key details, digest algorithm and length), the inclusion proof, and a checkpoint signed by the entry's own log. Witness cosignatures on the checkpoint are neither verified nor required. |
 
 A library failure caused by the timestamp is reported as MK-7; any other library
-failure as MK-8.
+failure as MK-8. Each profile rejection in the manifest also carries a
+language-neutral reason code (README.md, "Reason codes"): the clause's own code
+for MK-1 to MK-6 and the presence rule of MK-7, otherwise the code of the
+library error.

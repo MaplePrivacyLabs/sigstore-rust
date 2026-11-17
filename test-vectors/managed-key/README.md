@@ -11,8 +11,10 @@ of evidence to the signature. The statements are synthetic.
 - source and parent;
 - the single mutation made;
 - the expected library outcome, with and without `require_checkpoint_log_binding()`;
-- for rejections, the expected error category and message;
-- the outcome under the strict profile in [PROFILE.md](PROFILE.md), with the clause for rejections;
+- for rejections, the expected error category and message, and a language-neutral
+  reason code (see [Reason codes](#reason-codes));
+- the outcome under the strict profile in [PROFILE.md](PROFILE.md), with the clause
+  and reason code for rejections;
 - the outcome the pinned Cosign gives.
 
 `crates/sigstore-verify/tests/managed_key_corpus.rs` asserts all of this. A
@@ -79,6 +81,47 @@ made.
 - `profile-negative`: targets a requirement of the stricter profile in PROFILE.md and cites its clause. The profile rejects every such vector. The library's own outcome is recorded per mode and is usually acceptance, but some of these vectors are also rejected by the library for another reason (for example a missing media type, an invalid added SET, or a `null` integratedTime). Read each vector's expected outcomes rather than inferring them from the category.
 
 `cosign: null` marks cases Cosign is not expected to judge.
+
+## Reason codes
+
+Every rejection in the manifest carries a `code`, so a verifier written in
+another language can check that it rejects each vector for the same reason
+without matching this library's error messages. The codes name the first check
+that fails. For the strict profile, a clause checked before library
+verification has its own code; a rejection by library verification (MK-7
+timestamp failures and MK-8) carries the code of the library error with
+checkpoint-to-log binding on.
+
+| Code | The vector is rejected because |
+| --- | --- |
+| `bundle-malformed` | the bundle does not parse as a valid bundle |
+| `duplicate-json-key` | a JSON object repeats a member name (MK-4) |
+| `conflicting-oneof` | two variants of one protobuf `oneof` are present (MK-4) |
+| `media-type-unsupported` | the media type is missing or not an accepted version (MK-1) |
+| `tlog-entry-count` | there is not exactly one transparency log entry (MK-5) |
+| `tlog-entry-kind` | the entry is not a Rekor v2 `hashedrekord` 0.0.2 entry (MK-5) |
+| `integrated-time-present` | the entry has an `integratedTime` member (MK-6) |
+| `inclusion-promise-present` | the entry has an `inclusionPromise` member (MK-6) |
+| `timestamp-count` | there is not exactly one RFC 3161 timestamp (MK-7) |
+| `dsse-signature-invalid` | the DSSE signature does not verify with the verification key |
+| `inclusion-proof-missing` | the entry has no inclusion proof |
+| `inclusion-proof-invalid` | the inclusion proof does not lead to the checkpoint's root hash |
+| `inclusion-promise-missing` | an inclusion promise is required and absent |
+| `inclusion-promise-invalid` | the inclusion promise (SET) does not verify |
+| `checkpoint-origin-mismatch` | the checkpoint origin is not the entry's log |
+| `checkpoint-signature-invalid` | the checkpoint has no valid signature from the (entry's) log |
+| `tlog-key-details-mismatch` | the logged key details do not match the logged key |
+| `tlog-digest-algorithm-mismatch` | the logged digest algorithm does not match the key details |
+| `tlog-digest-malformed` | the logged digest has the wrong length for its algorithm |
+| `tlog-digest-mismatch` | the logged digest is not the digest of the signed content |
+| `tlog-key-mismatch` | the logged public key is not the verification key |
+| `tlog-signature-mismatch` | the logged signature is not the bundle's signature |
+| `timestamp-signature-invalid` | the timestamp's signature does not verify |
+| `timestamp-untrusted-authority` | the timestamp was not signed by a trusted timestamp authority |
+| `timestamp-message-mismatch` | the timestamp covers a different signature |
+
+`generate.py` assigns library codes from the error messages and asserts that
+each message maps to exactly one code.
 
 ## Regenerating and checking
 

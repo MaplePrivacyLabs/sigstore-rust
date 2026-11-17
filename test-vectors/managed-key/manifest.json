@@ -207,17 +207,20 @@
         "library": {
           "result": "reject",
           "error": "SignatureInvalid",
-          "message": "DSSE signature verification failed"
+          "message": "DSSE signature verification failed",
+          "code": "dsse-signature-invalid"
         },
         "library_checkpoint_log_binding": {
           "result": "reject",
           "error": "SignatureInvalid",
-          "message": "DSSE signature verification failed"
+          "message": "DSSE signature verification failed",
+          "code": "dsse-signature-invalid"
         },
         "profile": {
           "result": "reject",
           "clause": "MK-8",
-          "reason": "library verification fails"
+          "reason": "library verification fails",
+          "code": "dsse-signature-invalid"
         }
       },
       "cosign": "reject"
@@ -240,17 +243,20 @@
         "library": {
           "result": "reject",
           "error": "SignatureInvalid",
-          "message": "DSSE signature verification failed"
+          "message": "DSSE signature verification failed",
+          "code": "dsse-signature-invalid"
         },
         "library_checkpoint_log_binding": {
           "result": "reject",
           "error": "SignatureInvalid",
-          "message": "DSSE signature verification failed"
+          "message": "DSSE signature verification failed",
+          "code": "dsse-signature-invalid"
         },
         "profile": {
           "result": "reject",
           "clause": "MK-8",
-          "reason": "library verification fails"
+          "reason": "library verification fails",
+          "code": "dsse-signature-invalid"
         }
       },
       "cosign": "reject"
@@ -273,17 +279,20 @@
         "library": {
           "result": "reject",
           "error": "SignatureInvalid",
-          "message": "DSSE signature verification failed"
+          "message": "DSSE signature verification failed",
+          "code": "dsse-signature-invalid"
         },
         "library_checkpoint_log_binding": {
           "result": "reject",
           "error": "SignatureInvalid",
-          "message": "DSSE signature verification failed"
+          "message": "DSSE signature verification failed",
+          "code": "dsse-signature-invalid"
         },
         "profile": {
           "result": "reject",
           "clause": "MK-8",
-          "reason": "library verification fails"
+          "reason": "library verification fails",
+          "code": "dsse-signature-invalid"
         }
       },
       "cosign": "reject"
@@ -306,17 +315,20 @@
         "library": {
           "result": "reject",
           "error": "TransparencyLog.InclusionProof",
-          "message": "inclusion proof verification failed"
+          "message": "inclusion proof verification failed",
+          "code": "inclusion-proof-invalid"
         },
         "library_checkpoint_log_binding": {
           "result": "reject",
           "error": "TransparencyLog.InclusionProof",
-          "message": "inclusion proof verification failed"
+          "message": "inclusion proof verification failed",
+          "code": "inclusion-proof-invalid"
         },
         "profile": {
           "result": "reject",
           "clause": "MK-8",
-          "reason": "library verification fails"
+          "reason": "library verification fails",
+          "code": "inclusion-proof-invalid"
         }
       },
       "cosign": "reject"
@@ -339,17 +351,20 @@
         "library": {
           "result": "reject",
           "error": "Bundle",
-          "message": "bundle must have an inclusion proof"
+          "message": "bundle must have an inclusion proof",
+          "code": "inclusion-proof-missing"
         },
         "library_checkpoint_log_binding": {
           "result": "reject",
           "error": "Bundle",
-          "message": "bundle must have an inclusion proof"
+          "message": "bundle must have an inclusion proof",
+          "code": "inclusion-proof-missing"
         },
         "profile": {
           "result": "reject",
           "clause": "MK-8",
-          "reason": "library verification fails"
+          "reason": "library verification fails",
+          "code": "inclusion-proof-missing"
         }
       },
       "cosign": "reject"
@@ -372,17 +387,20 @@
         "library": {
           "result": "reject",
           "error": "TransparencyLog.Checkpoint",
-          "message": "No valid Rekor signature found on checkpoint"
+          "message": "No valid Rekor signature found on checkpoint",
+          "code": "checkpoint-signature-invalid"
         },
         "library_checkpoint_log_binding": {
           "result": "reject",
           "error": "TransparencyLog.Checkpoint",
-          "message": "checkpoint has no valid signature from the entry's log"
+          "message": "checkpoint has no valid signature from the entry's log",
+          "code": "checkpoint-signature-invalid"
         },
         "profile": {
           "result": "reject",
           "clause": "MK-8",
-          "reason": "library verification fails"
+          "reason": "library verification fails",
+          "code": "checkpoint-signature-invalid"
         }
       },
       "cosign": "reject"
@@ -405,17 +423,20 @@
         "library": {
           "result": "reject",
           "error": "TransparencyLog.Checkpoint",
-          "message": "No matching Rekor key found for checkpoint signature"
+          "message": "No matching Rekor key found for checkpoint signature",
+          "code": "checkpoint-signature-invalid"
         },
         "library_checkpoint_log_binding": {
           "result": "reject",
           "error": "TransparencyLog.Checkpoint",
-          "message": "checkpoint has no valid signature from the entry's log"
+          "message": "checkpoint has no valid signature from the entry's log",
+          "code": "checkpoint-signature-invalid"
         },
         "profile": {
           "result": "reject",
           "clause": "MK-8",
-          "reason": "library verification fails"
+          "reason": "library verification fails",
+          "code": "checkpoint-signature-invalid"
         }
       },
       "cosign": "reject"
@@ -438,17 +459,20 @@
         "library": {
           "result": "reject",
           "error": "TransparencyLog.InclusionProof",
-          "message": "inclusion proof verification failed"
+          "message": "inclusion proof verification failed",
+          "code": "inclusion-proof-invalid"
         },
         "library_checkpoint_log_binding": {
           "result": "reject",
           "error": "TransparencyLog.InclusionProof",
-          "message": "inclusion proof verification failed"
+          "message": "inclusion proof verification failed",
+          "code": "inclusion-proof-invalid"
         },
         "profile": {
           "result": "reject",
           "clause": "MK-8",
-          "reason": "library verification fails"
+          "reason": "library verification fails",
+          "code": "inclusion-proof-invalid"
         }
       },
       "cosign": "reject"
@@ -474,12 +498,14 @@
         "library_checkpoint_log_binding": {
           "result": "reject",
           "error": "TransparencyLog.Checkpoint",
-          "message": "does not match the entry's log \"rekor.sigstore.dev\""
+          "message": "does not match the entry's log \"rekor.sigstore.dev\"",
+          "code": "checkpoint-origin-mismatch"
         },
         "profile": {
           "result": "reject",
           "clause": "MK-8",
-          "reason": "checkpoint is not from the entry's log"
+          "reason": "checkpoint is not from the entry's log",
+          "code": "checkpoint-origin-mismatch"
         }
       },
       "cosign": "reject"
@@ -502,17 +528,20 @@
         "library": {
           "result": "reject",
           "error": "Timestamp.Invalid",
-          "message": "Failed to verify timestamp signature: Verification error: ECDSA_P384_SHA256 signature invalid"
+          "message": "Failed to verify timestamp signature: Verification error: ECDSA_P384_SHA256 signature invalid",
+          "code": "timestamp-signature-invalid"
         },
         "library_checkpoint_log_binding": {
           "result": "reject",
           "error": "Timestamp.Invalid",
-          "message": "Failed to verify timestamp signature: Verification error: ECDSA_P384_SHA256 signature invalid"
+          "message": "Failed to verify timestamp signature: Verification error: ECDSA_P384_SHA256 signature invalid",
+          "code": "timestamp-signature-invalid"
         },
         "profile": {
           "result": "reject",
           "clause": "MK-7",
-          "reason": "the timestamp does not verify"
+          "reason": "the timestamp does not verify",
+          "code": "timestamp-signature-invalid"
         }
       },
       "cosign": "reject"
@@ -535,17 +564,20 @@
         "library": {
           "result": "reject",
           "error": "Timestamp.Invalid",
-          "message": "CMS signer does not match any trusted TSA certificate"
+          "message": "CMS signer does not match any trusted TSA certificate",
+          "code": "timestamp-untrusted-authority"
         },
         "library_checkpoint_log_binding": {
           "result": "reject",
           "error": "Timestamp.Invalid",
-          "message": "CMS signer does not match any trusted TSA certificate"
+          "message": "CMS signer does not match any trusted TSA certificate",
+          "code": "timestamp-untrusted-authority"
         },
         "profile": {
           "result": "reject",
           "clause": "MK-7",
-          "reason": "the timestamp does not verify"
+          "reason": "the timestamp does not verify",
+          "code": "timestamp-untrusted-authority"
         }
       },
       "cosign": "reject"
@@ -568,17 +600,20 @@
         "library": {
           "result": "reject",
           "error": "Timestamp.Invalid",
-          "message": "Timestamp message hash mismatch"
+          "message": "Timestamp message hash mismatch",
+          "code": "timestamp-message-mismatch"
         },
         "library_checkpoint_log_binding": {
           "result": "reject",
           "error": "Timestamp.Invalid",
-          "message": "Timestamp message hash mismatch"
+          "message": "Timestamp message hash mismatch",
+          "code": "timestamp-message-mismatch"
         },
         "profile": {
           "result": "reject",
           "clause": "MK-7",
-          "reason": "the timestamp does not verify"
+          "reason": "the timestamp does not verify",
+          "code": "timestamp-message-mismatch"
         }
       },
       "cosign": "reject"
@@ -607,7 +642,8 @@
         "profile": {
           "result": "reject",
           "clause": "MK-7",
-          "reason": "exactly one timestamp is required"
+          "reason": "exactly one timestamp is required",
+          "code": "timestamp-count"
         }
       },
       "cosign": "reject"
@@ -636,7 +672,8 @@
         "profile": {
           "result": "reject",
           "clause": "MK-7",
-          "reason": "exactly one timestamp is required"
+          "reason": "exactly one timestamp is required",
+          "code": "timestamp-count"
         }
       },
       "cosign": null
@@ -665,7 +702,8 @@
         "profile": {
           "result": "reject",
           "clause": "MK-5",
-          "reason": "exactly one log entry is required"
+          "reason": "exactly one log entry is required",
+          "code": "tlog-entry-count"
         }
       },
       "cosign": null
@@ -694,7 +732,8 @@
         "profile": {
           "result": "reject",
           "clause": "MK-5",
-          "reason": "exactly one log entry is required"
+          "reason": "exactly one log entry is required",
+          "code": "tlog-entry-count"
         }
       },
       "cosign": null
@@ -723,7 +762,8 @@
         "profile": {
           "result": "reject",
           "clause": "MK-6",
-          "reason": "no integrated time is allowed"
+          "reason": "no integrated time is allowed",
+          "code": "integrated-time-present"
         }
       },
       "cosign": null
@@ -752,7 +792,8 @@
         "profile": {
           "result": "reject",
           "clause": "MK-6",
-          "reason": "no integrated time field is allowed"
+          "reason": "no integrated time field is allowed",
+          "code": "integrated-time-present"
         }
       },
       "cosign": null
@@ -781,7 +822,8 @@
         "profile": {
           "result": "reject",
           "clause": "MK-6",
-          "reason": "no integrated time field is allowed"
+          "reason": "no integrated time field is allowed",
+          "code": "integrated-time-present"
         }
       },
       "cosign": null
@@ -804,17 +846,20 @@
         "library": {
           "result": "reject",
           "error": "Parse",
-          "message": "invalid type: null, expected a protobuf int64"
+          "message": "invalid type: null, expected a protobuf int64",
+          "code": "bundle-malformed"
         },
         "library_checkpoint_log_binding": {
           "result": "reject",
           "error": "Parse",
-          "message": "invalid type: null, expected a protobuf int64"
+          "message": "invalid type: null, expected a protobuf int64",
+          "code": "bundle-malformed"
         },
         "profile": {
           "result": "reject",
           "clause": "MK-6",
-          "reason": "no integrated time field is allowed"
+          "reason": "no integrated time field is allowed",
+          "code": "integrated-time-present"
         }
       },
       "cosign": null
@@ -837,17 +882,20 @@
         "library": {
           "result": "reject",
           "error": "TransparencyLog.InclusionPromise",
-          "message": "SET verification failed"
+          "message": "SET verification failed",
+          "code": "inclusion-promise-invalid"
         },
         "library_checkpoint_log_binding": {
           "result": "reject",
           "error": "TransparencyLog.InclusionPromise",
-          "message": "SET verification failed"
+          "message": "SET verification failed",
+          "code": "inclusion-promise-invalid"
         },
         "profile": {
           "result": "reject",
           "clause": "MK-6",
-          "reason": "no inclusion promise is allowed"
+          "reason": "no inclusion promise is allowed",
+          "code": "inclusion-promise-present"
         }
       },
       "cosign": null
@@ -876,7 +924,8 @@
         "profile": {
           "result": "reject",
           "clause": "MK-1",
-          "reason": "only the v0.3 media type is accepted"
+          "reason": "only the v0.3 media type is accepted",
+          "code": "media-type-unsupported"
         }
       },
       "cosign": null
@@ -899,17 +948,20 @@
         "library": {
           "result": "reject",
           "error": "Bundle",
-          "message": "bundles must have an inclusion promise"
+          "message": "bundles must have an inclusion promise",
+          "code": "inclusion-promise-missing"
         },
         "library_checkpoint_log_binding": {
           "result": "reject",
           "error": "Bundle",
-          "message": "bundles must have an inclusion promise"
+          "message": "bundles must have an inclusion promise",
+          "code": "inclusion-promise-missing"
         },
         "profile": {
           "result": "reject",
           "clause": "MK-1",
-          "reason": "only the v0.3 media type is accepted"
+          "reason": "only the v0.3 media type is accepted",
+          "code": "media-type-unsupported"
         }
       },
       "cosign": null
@@ -938,7 +990,8 @@
         "profile": {
           "result": "reject",
           "clause": "MK-4",
-          "reason": "duplicate JSON keys are rejected"
+          "reason": "duplicate JSON keys are rejected",
+          "code": "duplicate-json-key"
         }
       },
       "cosign": null
@@ -967,7 +1020,8 @@
         "profile": {
           "result": "reject",
           "clause": "MK-4",
-          "reason": "conflicting content variants are rejected"
+          "reason": "conflicting content variants are rejected",
+          "code": "conflicting-oneof"
         }
       },
       "cosign": null
@@ -1044,17 +1098,20 @@
         "library": {
           "result": "reject",
           "error": "TransparencyLog.EntryMismatch",
-          "message": "key details PKIX_ECDSA_P256_SHA_256 do not match its EcdsaP384 key"
+          "message": "key details PKIX_ECDSA_P256_SHA_256 do not match its EcdsaP384 key",
+          "code": "tlog-key-details-mismatch"
         },
         "library_checkpoint_log_binding": {
           "result": "reject",
           "error": "TransparencyLog.EntryMismatch",
-          "message": "key details PKIX_ECDSA_P256_SHA_256 do not match its EcdsaP384 key"
+          "message": "key details PKIX_ECDSA_P256_SHA_256 do not match its EcdsaP384 key",
+          "code": "tlog-key-details-mismatch"
         },
         "profile": {
           "result": "reject",
           "clause": "MK-8",
-          "reason": "library verification fails"
+          "reason": "library verification fails",
+          "code": "tlog-key-details-mismatch"
         }
       },
       "cosign": "reject"
@@ -1077,17 +1134,20 @@
         "library": {
           "result": "reject",
           "error": "TransparencyLog.EntryMismatch",
-          "message": "key details PKIX_ECDSA_P384_SHA_384 do not match its EcdsaP256 key"
+          "message": "key details PKIX_ECDSA_P384_SHA_384 do not match its EcdsaP256 key",
+          "code": "tlog-key-details-mismatch"
         },
         "library_checkpoint_log_binding": {
           "result": "reject",
           "error": "TransparencyLog.EntryMismatch",
-          "message": "key details PKIX_ECDSA_P384_SHA_384 do not match its EcdsaP256 key"
+          "message": "key details PKIX_ECDSA_P384_SHA_384 do not match its EcdsaP256 key",
+          "code": "tlog-key-details-mismatch"
         },
         "profile": {
           "result": "reject",
           "clause": "MK-8",
-          "reason": "library verification fails"
+          "reason": "library verification fails",
+          "code": "tlog-key-details-mismatch"
         }
       },
       "cosign": "reject"
@@ -1110,17 +1170,20 @@
         "library": {
           "result": "reject",
           "error": "TransparencyLog.EntryMismatch",
-          "message": "digest algorithm SHA2_256 does not match key details PKIX_ECDSA_P384_SHA_384"
+          "message": "digest algorithm SHA2_256 does not match key details PKIX_ECDSA_P384_SHA_384",
+          "code": "tlog-digest-algorithm-mismatch"
         },
         "library_checkpoint_log_binding": {
           "result": "reject",
           "error": "TransparencyLog.EntryMismatch",
-          "message": "digest algorithm SHA2_256 does not match key details PKIX_ECDSA_P384_SHA_384"
+          "message": "digest algorithm SHA2_256 does not match key details PKIX_ECDSA_P384_SHA_384",
+          "code": "tlog-digest-algorithm-mismatch"
         },
         "profile": {
           "result": "reject",
           "clause": "MK-8",
-          "reason": "library verification fails"
+          "reason": "library verification fails",
+          "code": "tlog-digest-algorithm-mismatch"
         }
       },
       "cosign": "reject"
@@ -1143,17 +1206,20 @@
         "library": {
           "result": "reject",
           "error": "TransparencyLog.MalformedEntry",
-          "message": "SHA2_384 digest is 32 bytes, expected 48"
+          "message": "SHA2_384 digest is 32 bytes, expected 48",
+          "code": "tlog-digest-malformed"
         },
         "library_checkpoint_log_binding": {
           "result": "reject",
           "error": "TransparencyLog.MalformedEntry",
-          "message": "SHA2_384 digest is 32 bytes, expected 48"
+          "message": "SHA2_384 digest is 32 bytes, expected 48",
+          "code": "tlog-digest-malformed"
         },
         "profile": {
           "result": "reject",
           "clause": "MK-8",
-          "reason": "library verification fails"
+          "reason": "library verification fails",
+          "code": "tlog-digest-malformed"
         }
       },
       "cosign": "reject"
@@ -1176,17 +1242,20 @@
         "library": {
           "result": "reject",
           "error": "ArtifactMismatch",
-          "message": "artifact hash mismatch for hashedrekord entry"
+          "message": "artifact hash mismatch for hashedrekord entry",
+          "code": "tlog-digest-mismatch"
         },
         "library_checkpoint_log_binding": {
           "result": "reject",
           "error": "ArtifactMismatch",
-          "message": "artifact hash mismatch for hashedrekord entry"
+          "message": "artifact hash mismatch for hashedrekord entry",
+          "code": "tlog-digest-mismatch"
         },
         "profile": {
           "result": "reject",
           "clause": "MK-8",
-          "reason": "library verification fails"
+          "reason": "library verification fails",
+          "code": "tlog-digest-mismatch"
         }
       },
       "cosign": "reject"
@@ -1209,17 +1278,20 @@
         "library": {
           "result": "reject",
           "error": "ArtifactMismatch",
-          "message": "artifact hash mismatch for hashedrekord entry"
+          "message": "artifact hash mismatch for hashedrekord entry",
+          "code": "tlog-digest-mismatch"
         },
         "library_checkpoint_log_binding": {
           "result": "reject",
           "error": "ArtifactMismatch",
-          "message": "artifact hash mismatch for hashedrekord entry"
+          "message": "artifact hash mismatch for hashedrekord entry",
+          "code": "tlog-digest-mismatch"
         },
         "profile": {
           "result": "reject",
           "clause": "MK-8",
-          "reason": "library verification fails"
+          "reason": "library verification fails",
+          "code": "tlog-digest-mismatch"
         }
       },
       "cosign": "reject"
@@ -1242,17 +1314,20 @@
         "library": {
           "result": "reject",
           "error": "TransparencyLog.EntryMismatch",
-          "message": "public key in Rekor entry does not match managed key"
+          "message": "public key in Rekor entry does not match managed key",
+          "code": "tlog-key-mismatch"
         },
         "library_checkpoint_log_binding": {
           "result": "reject",
           "error": "TransparencyLog.EntryMismatch",
-          "message": "public key in Rekor entry does not match managed key"
+          "message": "public key in Rekor entry does not match managed key",
+          "code": "tlog-key-mismatch"
         },
         "profile": {
           "result": "reject",
           "clause": "MK-8",
-          "reason": "library verification fails"
+          "reason": "library verification fails",
+          "code": "tlog-key-mismatch"
         }
       },
       "cosign": "reject"
@@ -1275,17 +1350,20 @@
         "library": {
           "result": "reject",
           "error": "TransparencyLog.EntryMismatch",
-          "message": "DSSE signature in bundle does not match signature in Rekor entry"
+          "message": "DSSE signature in bundle does not match signature in Rekor entry",
+          "code": "tlog-signature-mismatch"
         },
         "library_checkpoint_log_binding": {
           "result": "reject",
           "error": "TransparencyLog.EntryMismatch",
-          "message": "DSSE signature in bundle does not match signature in Rekor entry"
+          "message": "DSSE signature in bundle does not match signature in Rekor entry",
+          "code": "tlog-signature-mismatch"
         },
         "profile": {
           "result": "reject",
           "clause": "MK-8",
-          "reason": "library verification fails"
+          "reason": "library verification fails",
+          "code": "tlog-signature-mismatch"
         }
       },
       "cosign": "reject"
@@ -1311,12 +1389,14 @@
         "library_checkpoint_log_binding": {
           "result": "reject",
           "error": "TransparencyLog.Checkpoint",
-          "message": "checkpoint has no valid signature from the entry's log"
+          "message": "checkpoint has no valid signature from the entry's log",
+          "code": "checkpoint-signature-invalid"
         },
         "profile": {
           "result": "reject",
           "clause": "MK-8",
-          "reason": "checkpoint is not from the entry's log"
+          "reason": "checkpoint is not from the entry's log",
+          "code": "checkpoint-signature-invalid"
         }
       },
       "cosign": "reject"
@@ -1342,12 +1422,14 @@
         "library_checkpoint_log_binding": {
           "result": "reject",
           "error": "TransparencyLog.Checkpoint",
-          "message": "checkpoint origin \"test-log-b.rekor.example.com\" does not match the entry's log \"test-log-a.rekor.example.com\""
+          "message": "checkpoint origin \"test-log-b.rekor.example.com\" does not match the entry's log \"test-log-a.rekor.example.com\"",
+          "code": "checkpoint-origin-mismatch"
         },
         "profile": {
           "result": "reject",
           "clause": "MK-8",
-          "reason": "checkpoint is not from the entry's log"
+          "reason": "checkpoint is not from the entry's log",
+          "code": "checkpoint-origin-mismatch"
         }
       },
       "cosign": "reject"
@@ -1376,7 +1458,8 @@
         "profile": {
           "result": "reject",
           "clause": "MK-5",
-          "reason": "Rekor v1 entries are rejected"
+          "reason": "Rekor v1 entries are rejected",
+          "code": "tlog-entry-kind"
         }
       },
       "cosign": "accept"
@@ -1402,12 +1485,14 @@
         "library_checkpoint_log_binding": {
           "result": "reject",
           "error": "TransparencyLog.Checkpoint",
-          "message": "does not match the entry's log \"rekor.sigstore.dev\""
+          "message": "does not match the entry's log \"rekor.sigstore.dev\"",
+          "code": "checkpoint-origin-mismatch"
         },
         "profile": {
           "result": "reject",
           "clause": "MK-8",
-          "reason": "checkpoint is not from the entry's log"
+          "reason": "checkpoint is not from the entry's log",
+          "code": "checkpoint-origin-mismatch"
         }
       },
       "cosign": "reject"
