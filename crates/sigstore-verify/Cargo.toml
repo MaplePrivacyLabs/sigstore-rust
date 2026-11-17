@@ -1,14 +1,18 @@
 [package]
-name = "sigstore-verify"
-description = "Sigstore signature verification"
-version.workspace = true
+name = "maple-sigstore-verify"
+description = "Sigstore signature verification (fork of sigstore-verify 0.16.0 with P-384 Rekor v2 support)"
+version = "0.16.0-p384.1"
 edition.workspace = true
 license.workspace = true
-repository.workspace = true
+repository = "https://github.com/MaplePrivacyLabs/sigstore-rust"
 rust-version.workspace = true
 # These tests read corpora from the repository's test-vectors directory,
 # which is not part of the package.
 exclude = ["tests/conformance_vectors.rs", "tests/managed_key_corpus.rs"]
+readme = "README.md"
+
+[lib]
+name = "sigstore_verify"
 
 [dependencies]
 sigstore-types = { workspace = true }

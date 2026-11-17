@@ -1,3 +1,13 @@
+> **maple-sigstore-rekor** is a fork of [`sigstore-rekor`](https://crates.io/crates/sigstore-rekor)
+> 0.16.0 from [sigstore/sigstore-rust](https://github.com/sigstore/sigstore-rust)
+> (release commit `55227ff848a69d2d81ac36607d6fcfa25b97553a`) that adds verification of
+> P-384 Rekor v2 `hashedrekord` entries and an opt-in checkpoint-to-log binding. The
+> library name is unchanged (`sigstore_rekor`); the other `sigstore-*` crates it uses are the
+> unmodified upstream 0.16.0 releases. Source:
+> [MaplePrivacyLabs/sigstore-rust](https://github.com/MaplePrivacyLabs/sigstore-rust), at the
+> commit recorded in this package's `.cargo_vcs_info.json`. Licensed under Apache-2.0, like
+> upstream (see `LICENSE`). It will be retired once an upstream release includes the fix.
+
 # sigstore-rekor
 
 Rekor transparency-log client for [sigstore-rust](https://github.com/sigstore/sigstore-rust).

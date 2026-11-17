@@ -1,11 +1,15 @@
 [package]
-name = "sigstore-rekor"
-description = "Rekor transparency log client for Sigstore"
-version.workspace = true
+name = "maple-sigstore-rekor"
+description = "Rekor transparency log client for Sigstore (fork of sigstore-rekor 0.16.0 with P-384 Rekor v2 support)"
+version = "0.16.0-p384.1"
 edition.workspace = true
 license.workspace = true
-repository.workspace = true
+repository = "https://github.com/MaplePrivacyLabs/sigstore-rust"
 rust-version.workspace = true
+readme = "README.md"
+
+[lib]
+name = "sigstore_rekor"
 
 [features]
 default = ["rustls", "aws-lc-rs"]
