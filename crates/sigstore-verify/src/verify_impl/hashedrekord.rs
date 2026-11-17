@@ -5,10 +5,13 @@
 
 use crate::artifact::PreparedArtifact;
 use crate::error::{Error, Result};
-use sigstore_rekor::body::RekorEntryBody;
+use sigstore_crypto::{parse_certificate_info, ArtifactHasher, KeyAlgorithm};
+use sigstore_rekor::body::{HashedRekordV002Data, RekorEntryBody};
+use sigstore_rekor::RekorV2KeyDetails;
 use sigstore_types::bundle::VerificationMaterialContent;
 use sigstore_types::{
-    Bundle, DerPublicKey, KindVersion, Sha256Hash, SignatureContent, TransparencyLogEntry,
+    Bundle, DerPublicKey, HashAlgorithm, KindVersion, Sha256Hash, SignatureContent,
+    TransparencyLogEntry,
 };
 use x509_cert::der::Decode;
 use x509_cert::Certificate;
@@ -31,41 +34,50 @@ pub(crate) fn verify_hashedrekord_entry(
     let body = RekorEntryBody::parse(&entry.canonicalized_body, entry.kind_version)
         .map_err(|e| Error::malformed_entry(format!("failed to parse Rekor body: {}", e)))?;
 
-    // Compute hash from artifact (bytes or pre-computed digest) or DSSE envelope
-    let hash = match &bundle.content {
-        SignatureContent::MessageSignature(_) => artifact.sha256()?,
-        SignatureContent::DsseEnvelope(envelope) => sigstore_crypto::sha256(&envelope.pae()),
-        _ => {
-            return Err(Error::UnsupportedBundle(
-                "unsupported bundle signature content".to_string(),
-            ))
-        }
-    };
-
-    // Validate artifact hash matches what's in Rekor
+    // Validate that the logged digest is the digest of this artifact or DSSE
+    // envelope
     match &body {
         RekorEntryBody::HashedRekordV001(rekord) => {
-            // v0.0.1: spec.data.hash.value (hex-encoded)
+            // v0.0.1: spec.data.hash.value (hex-encoded SHA-256)
+            let hash = match &bundle.content {
+                SignatureContent::MessageSignature(_) => artifact.sha256()?,
+                SignatureContent::DsseEnvelope(envelope) => {
+                    sigstore_crypto::sha256(&envelope.pae())
+                }
+                _ => {
+                    return Err(Error::UnsupportedBundle(
+                        "unsupported bundle signature content".to_string(),
+                    ))
+                }
+            };
             let expected =
                 Sha256Hash::from_hex(rekord.spec.data.hash.value.as_str()).map_err(|e| {
                     Error::malformed_entry(format!("invalid hash in Rekor entry: {}", e))
                 })?;
-            validate_artifact_hash(&hash, &expected)?;
+            validate_artifact_hash(hash.as_bytes(), expected.as_bytes())?;
         }
         RekorEntryBody::HashedRekordV002(rekord) => {
-            // v0.0.2 is currently defined only for SHA-256/P-256 entries. Do
-            // not reinterpret a digest logged under a different algorithm.
+            // v0.0.2: the key details fix the digest algorithm. The logged key,
+            // digest algorithm and digest length must all agree with them
+            // before the digest itself is compared.
             let logged = &rekord.spec.hashed_rekord_v002;
-            if logged.data.algorithm != sigstore_types::HashAlgorithm::Sha2256 {
-                return Err(Error::UnsupportedBundle(format!(
-                    "unsupported Rekor v2 digest algorithm: {}",
-                    logged.data.algorithm
-                )));
-            }
-            let expected = Sha256Hash::try_from(&logged.data.digest).map_err(|e| {
-                Error::malformed_entry(format!("invalid digest in Rekor entry: {}", e))
-            })?;
-            validate_artifact_hash(&hash, &expected)?;
+            let algorithm = validate_v002_algorithms(logged)?;
+            let hash = match &bundle.content {
+                SignatureContent::MessageSignature(_) => artifact.digest(algorithm)?,
+                SignatureContent::DsseEnvelope(envelope) => {
+                    // The DSSE pre-authentication encoding is hashed with the
+                    // signature's hash algorithm, e.g. SHA-384 for P-384.
+                    let mut hasher = ArtifactHasher::new(algorithm)?;
+                    hasher.update(&envelope.pae());
+                    hasher.finalize()
+                }
+                _ => {
+                    return Err(Error::UnsupportedBundle(
+                        "unsupported bundle signature content".to_string(),
+                    ))
+                }
+            };
+            validate_artifact_hash(hash.as_bytes(), logged.data.digest.as_bytes())?;
         }
         _ => {
             return Err(Error::malformed_entry(format!(
@@ -88,7 +100,7 @@ pub(crate) fn verify_hashedrekord_entry(
 }
 
 /// Validate artifact hash matches expected hash
-fn validate_artifact_hash(artifact_hash: &Sha256Hash, expected_hash: &Sha256Hash) -> Result<()> {
+fn validate_artifact_hash(artifact_hash: &[u8], expected_hash: &[u8]) -> Result<()> {
     if artifact_hash != expected_hash {
         return Err(Error::ArtifactMismatch(
             "artifact hash mismatch for hashedrekord entry".to_string(),
@@ -96,6 +108,72 @@ fn validate_artifact_hash(artifact_hash: &Sha256Hash, expected_hash: &Sha256Hash
     }
 
     Ok(())
+}
+
+/// Check that a Rekor v2 entry's key details agree with the key it logs, its
+/// digest algorithm and its digest length, and return the digest algorithm.
+///
+/// A Rekor v2 log derives the digest algorithm from the key details, so an
+/// entry whose fields disagree was not produced by a conforming log for this
+/// signature.
+fn validate_v002_algorithms(logged: &HashedRekordV002Data) -> Result<HashAlgorithm> {
+    let key_details = logged.signature.verifier.key_details;
+    let expected_key = match key_details {
+        RekorV2KeyDetails::PkixEcdsaP256Sha256 => KeyAlgorithm::EcdsaP256,
+        RekorV2KeyDetails::PkixEcdsaP384Sha384 => KeyAlgorithm::EcdsaP384,
+        other => {
+            return Err(Error::UnsupportedBundle(format!(
+                "unsupported Rekor v2 key details: {other}"
+            )))
+        }
+    };
+
+    let verifier = &logged.signature.verifier;
+    let logged_key = match (&verifier.public_key, &verifier.x509_certificate) {
+        (Some(key), None) => KeyAlgorithm::from_spki(&key.raw_bytes).map_err(|e| {
+            Error::malformed_entry(format!("invalid public key in Rekor entry: {e}"))
+        })?,
+        (None, Some(cert)) => {
+            parse_certificate_info(&cert.raw_bytes)
+                .map_err(|e| {
+                    Error::malformed_entry(format!("invalid certificate in Rekor entry: {e}"))
+                })?
+                .key_algorithm
+        }
+        (Some(_), Some(_)) => {
+            return Err(Error::malformed_entry(
+                "Rekor entry verifier has both a public key and a certificate".to_string(),
+            ))
+        }
+        (None, None) => {
+            return Err(Error::malformed_entry(
+                "Rekor entry verifier has neither a public key nor a certificate".to_string(),
+            ))
+        }
+    };
+    if logged_key != expected_key {
+        return Err(Error::entry_mismatch(format!(
+            "Rekor entry key details {key_details} do not match its {logged_key:?} key"
+        )));
+    }
+
+    let algorithm = key_details.hash_algorithm();
+    if logged.data.algorithm != algorithm {
+        return Err(Error::entry_mismatch(format!(
+            "Rekor entry digest algorithm {} does not match key details {key_details} ({algorithm})",
+            logged.data.algorithm
+        )));
+    }
+
+    let length = logged.data.digest.as_bytes().len();
+    if length != algorithm.digest_size() {
+        return Err(Error::malformed_entry(format!(
+            "Rekor entry {algorithm} digest is {length} bytes, expected {}",
+            algorithm.digest_size()
+        )));
+    }
+
+    Ok(algorithm)
 }
 
 /// Validate that the certificate in Rekor matches the certificate in the bundle
@@ -295,4 +373,252 @@ fn validate_integrated_time(entry: &TransparencyLogEntry, bundle: &Bundle) -> Re
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::artifact::ArtifactRequirements;
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    use sigstore_crypto::SigningScheme;
+    use sigstore_types::Artifact;
+
+    /// Throwaway public keys; only their algorithm identifiers matter here.
+    const P384_KEY: &str = "MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAEPjUQjqathWUZXpBdDJWDjVyyt2YdKshU+5yRnQu+LoY/+s+ASLZMFAscoSnyNhtJqIanYUWKH3bcnJvjUhYX8PsLZ4U28uOSh++vOqacWHVOK3CRJGmw47AudN9oHsO6";
+    const P256_KEY: &str = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEd1cZefkJQlXtMUcBsptiJ8HfpRyHwukZWXVCjrRIMK8U1k3lOw8CXdzE/iLy5DEiqa4oA8td++rmxiPlJlZUAg==";
+    const SIGNATURE: &str = "c2lnbmF0dXJl";
+
+    fn statement() -> Vec<u8> {
+        let subject = sigstore_crypto::sha256(b"artifact").to_hex();
+        format!(
+            r#"{{"_type":"https://in-toto.io/Statement/v1","subject":[{{"name":"a","digest":{{"sha256":"{subject}"}}}}],"predicateType":"https://example.com/predicate/v1","predicate":{{}}}}"#
+        )
+        .into_bytes()
+    }
+
+    fn pae() -> Vec<u8> {
+        let payload = statement();
+        let payload_type = "application/vnd.in-toto+json";
+        let mut pae = format!(
+            "DSSEv1 {} {} {} ",
+            payload_type.len(),
+            payload_type,
+            payload.len()
+        )
+        .into_bytes();
+        pae.extend_from_slice(&payload);
+        pae
+    }
+
+    struct Entry {
+        key_details: &'static str,
+        key: &'static str,
+        algorithm: &'static str,
+        digest: Vec<u8>,
+    }
+
+    impl Entry {
+        fn conforming_p384() -> Self {
+            Self {
+                key_details: "PKIX_ECDSA_P384_SHA_384",
+                key: P384_KEY,
+                algorithm: "SHA2_384",
+                digest: sigstore_crypto::sha384(&pae()).as_bytes().to_vec(),
+            }
+        }
+
+        fn conforming_p256() -> Self {
+            Self {
+                key_details: "PKIX_ECDSA_P256_SHA_256",
+                key: P256_KEY,
+                algorithm: "SHA2_256",
+                digest: sigstore_crypto::sha256(&pae()).as_bytes().to_vec(),
+            }
+        }
+
+        /// Verify a DSSE bundle carrying this entry with `managed_key`.
+        fn verify(&self, managed_key: &str) -> Result<()> {
+            let body = format!(
+                r#"{{"apiVersion":"0.0.2","kind":"hashedrekord","spec":{{"hashedRekordV002":{{"data":{{"algorithm":"{}","digest":"{}"}},"signature":{{"content":"{SIGNATURE}","verifier":{{"keyDetails":"{}","publicKey":{{"rawBytes":"{}"}}}}}}}}}}}}"#,
+                self.algorithm,
+                STANDARD.encode(&self.digest),
+                self.key_details,
+                self.key,
+            );
+            let bundle = format!(
+                r#"{{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json","verificationMaterial":{{"publicKey":{{"hint":"hint"}},"tlogEntries":[{{"logIndex":"1","logId":{{"keyId":"{}"}},"kindVersion":{{"kind":"hashedrekord","version":"0.0.2"}},"canonicalizedBody":"{}"}}]}},"dsseEnvelope":{{"payload":"{}","payloadType":"application/vnd.in-toto+json","signatures":[{{"sig":"{SIGNATURE}","keyid":""}}]}}}}"#,
+                STANDARD.encode([0u8; 32]),
+                STANDARD.encode(body),
+                STANDARD.encode(statement()),
+            );
+            let bundle = Bundle::from_json(&bundle).unwrap();
+            let managed_key = DerPublicKey::new(STANDARD.decode(managed_key).unwrap());
+            let requirements =
+                ArtifactRequirements::new(&bundle.content, SigningScheme::EcdsaP384Sha384).unwrap();
+            let artifact =
+                PreparedArtifact::from_artifact(Artifact::Blob(b"artifact"), &requirements)
+                    .unwrap();
+            let entry = &bundle.verification_material.tlog_entries[0];
+            verify_hashedrekord_entry(entry, &bundle, &artifact, Some(&managed_key))
+        }
+    }
+
+    fn assert_entry_mismatch(result: Result<()>, expected: &str) {
+        match result {
+            Err(Error::TransparencyLog(crate::error::TransparencyLogError::EntryMismatch(m)))
+                if m.contains(expected) => {}
+            other => panic!("expected entry mismatch containing {expected:?}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn p384_dsse_entry_binds_sha384_of_pae() {
+        Entry::conforming_p384().verify(P384_KEY).unwrap();
+    }
+
+    #[test]
+    fn p256_dsse_entry_binds_sha256_of_pae() {
+        Entry::conforming_p256().verify(P256_KEY).unwrap();
+    }
+
+    #[test]
+    fn p384_entry_with_sha256_of_pae_is_rejected() {
+        // A P-256-shaped digest under P-384 key details: the algorithm label
+        // disagrees with the key details.
+        let entry = Entry {
+            algorithm: "SHA2_256",
+            digest: sigstore_crypto::sha256(&pae()).as_bytes().to_vec(),
+            ..Entry::conforming_p384()
+        };
+        assert_entry_mismatch(
+            entry.verify(P384_KEY),
+            "digest algorithm SHA2_256 does not match key details PKIX_ECDSA_P384_SHA_384",
+        );
+    }
+
+    #[test]
+    fn key_details_must_match_the_logged_key() {
+        // P-384 key labelled as P-256.
+        let entry = Entry {
+            key_details: "PKIX_ECDSA_P256_SHA_256",
+            ..Entry::conforming_p384()
+        };
+        assert_entry_mismatch(
+            entry.verify(P384_KEY),
+            "key details PKIX_ECDSA_P256_SHA_256 do not match its EcdsaP384 key",
+        );
+
+        // P-256 key labelled as P-384, with an otherwise consistent SHA-384
+        // digest.
+        let entry = Entry {
+            key_details: "PKIX_ECDSA_P384_SHA_384",
+            algorithm: "SHA2_384",
+            digest: sigstore_crypto::sha384(&pae()).as_bytes().to_vec(),
+            ..Entry::conforming_p256()
+        };
+        assert_entry_mismatch(
+            entry.verify(P256_KEY),
+            "key details PKIX_ECDSA_P384_SHA_384 do not match its EcdsaP256 key",
+        );
+    }
+
+    #[test]
+    fn digest_length_must_match_the_algorithm() {
+        let mut entry = Entry::conforming_p384();
+        entry.digest.truncate(32);
+        match entry.verify(P384_KEY) {
+            Err(Error::TransparencyLog(crate::error::TransparencyLogError::MalformedEntry(m)))
+                if m.contains("SHA2_384 digest is 32 bytes, expected 48") => {}
+            other => panic!("unexpected result {other:?}"),
+        }
+    }
+
+    #[test]
+    fn digest_value_must_match_the_pae() {
+        let mut entry = Entry::conforming_p384();
+        entry.digest[0] ^= 1;
+        assert!(matches!(
+            entry.verify(P384_KEY),
+            Err(Error::ArtifactMismatch(_))
+        ));
+
+        // SHA-384 of the payload alone is not the logged digest.
+        let entry = Entry {
+            digest: sigstore_crypto::sha384(&statement()).as_bytes().to_vec(),
+            ..Entry::conforming_p384()
+        };
+        assert!(matches!(
+            entry.verify(P384_KEY),
+            Err(Error::ArtifactMismatch(_))
+        ));
+    }
+
+    #[test]
+    fn logged_key_must_match_the_managed_key() {
+        let entry = Entry::conforming_p384();
+        let other_p384 = "MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAEg9Umw8SVCTf5swPswBu3b1qXDPc4+Uj4T/h/F6bm2I6xkA4O1bXzTy4nnmGXxevyrRlJeUIRrHd/aJLs4p084odVdyJAvgYMmzfiSpib1N2SmCTLKRXOyS45o6N4w40m";
+        assert_entry_mismatch(
+            entry.verify(other_p384),
+            "public key in Rekor entry does not match managed key",
+        );
+    }
+
+    #[test]
+    fn p384_message_signature_entry_binds_sha384_of_artifact() {
+        let verify = |logged: &[u8], supplied: Artifact<'_>| {
+            let body = format!(
+                r#"{{"apiVersion":"0.0.2","kind":"hashedrekord","spec":{{"hashedRekordV002":{{"data":{{"algorithm":"SHA2_384","digest":"{}"}},"signature":{{"content":"{SIGNATURE}","verifier":{{"keyDetails":"PKIX_ECDSA_P384_SHA_384","publicKey":{{"rawBytes":"{P384_KEY}"}}}}}}}}}}}}"#,
+                STANDARD.encode(logged),
+            );
+            let bundle = format!(
+                r#"{{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json","verificationMaterial":{{"publicKey":{{"hint":"hint"}},"tlogEntries":[{{"logIndex":"1","logId":{{"keyId":"{}"}},"kindVersion":{{"kind":"hashedrekord","version":"0.0.2"}},"canonicalizedBody":"{}"}}]}},"messageSignature":{{"signature":"{SIGNATURE}"}}}}"#,
+                STANDARD.encode([0u8; 32]),
+                STANDARD.encode(body),
+            );
+            let bundle = Bundle::from_json(&bundle).unwrap();
+            let key = DerPublicKey::new(STANDARD.decode(P384_KEY).unwrap());
+            let requirements =
+                ArtifactRequirements::new(&bundle.content, SigningScheme::EcdsaP384Sha384).unwrap();
+            let artifact = PreparedArtifact::from_artifact(supplied, &requirements).unwrap();
+            let entry = &bundle.verification_material.tlog_entries[0];
+            verify_hashedrekord_entry(entry, &bundle, &artifact, Some(&key))
+        };
+        let digest = sigstore_crypto::sha384(b"artifact");
+        verify(digest.as_bytes(), Artifact::Blob(b"artifact")).unwrap();
+        assert!(matches!(
+            verify(digest.as_bytes(), Artifact::Blob(b"other")),
+            Err(Error::ArtifactMismatch(_))
+        ));
+        // A SHA-256 digest of the artifact cannot be checked against a
+        // SHA-384 entry, so verification fails closed.
+        let sha256 = sigstore_crypto::sha256(b"artifact");
+        assert!(matches!(
+            verify(
+                digest.as_bytes(),
+                Artifact::Digest(
+                    sigstore_types::ArtifactDigest::new(
+                        HashAlgorithm::Sha2256,
+                        sha256.as_bytes().to_vec()
+                    )
+                    .unwrap()
+                )
+            ),
+            Err(Error::UnsupportedArtifact(_))
+        ));
+    }
+
+    #[test]
+    fn unknown_key_details_fail_to_parse() {
+        let entry = Entry {
+            key_details: "PKIX_ECDSA_P384_SHA_256",
+            ..Entry::conforming_p384()
+        };
+        assert!(matches!(
+            entry.verify(P384_KEY),
+            Err(Error::TransparencyLog(
+                crate::error::TransparencyLogError::MalformedEntry(_)
+            ))
+        ));
+    }
 }
