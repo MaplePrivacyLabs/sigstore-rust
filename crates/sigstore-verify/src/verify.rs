@@ -47,6 +47,7 @@ pub enum CertificatePolicy {
 pub struct PublicKeyVerificationPolicy {
     public_key: sigstore_types::DerPublicKey,
     verify_tlog: bool,
+    checkpoint_log_binding: bool,
 }
 
 impl PublicKeyVerificationPolicy {
@@ -56,6 +57,7 @@ impl PublicKeyVerificationPolicy {
         Self {
             public_key,
             verify_tlog: true,
+            checkpoint_log_binding: false,
         }
     }
 
@@ -76,6 +78,38 @@ impl PublicKeyVerificationPolicy {
     /// Whether transparency log inclusion is verified.
     pub fn verifies_tlog(&self) -> bool {
         self.verify_tlog
+    }
+
+    /// Require each checkpoint to be signed by the entry's own log.
+    ///
+    /// By default a checkpoint is accepted when any Rekor key in the trusted
+    /// root signed it, so an entry naming one log can be shown included under
+    /// a checkpoint from another trusted log. With this option, the
+    /// checkpoint must carry a valid signature from the key whose log ID is
+    /// the entry's log ID, and for Rekor v2 its origin must equal the host of
+    /// that log's base URL in the trusted root. Other signature lines, such as
+    /// witness cosignatures, are still ignored.
+    ///
+    /// Limitation: for Rekor v1 entries only the signing key is bound, not the
+    /// checkpoint origin. A Rekor v1 origin includes a tree ID that the
+    /// trusted root does not record, so there is no expected origin to compare
+    /// against.
+    ///
+    /// For Rekor v2 entries, a trusted log whose base URL is not an absolute
+    /// `http(s)` URL with a host (and no user info) has no expected origin,
+    /// and its entries fail verification when this option is set.
+    ///
+    /// This only affects inclusion proof verification, so it has no effect
+    /// when transparency log verification is skipped.
+    pub fn require_checkpoint_log_binding(mut self) -> Self {
+        self.checkpoint_log_binding = true;
+        self
+    }
+
+    /// Whether checkpoints must be signed by the entry's own log; see
+    /// [`Self::require_checkpoint_log_binding`].
+    pub fn requires_checkpoint_log_binding(&self) -> bool {
+        self.checkpoint_log_binding
     }
 }
 
@@ -237,6 +271,7 @@ pub struct VerificationPolicy {
     issuer: Option<String>,
     verify_tlog: bool,
     certificate: CertificatePolicy,
+    checkpoint_log_binding: bool,
 }
 
 impl VerificationPolicy {
@@ -260,6 +295,7 @@ impl VerificationPolicy {
             issuer: None,
             verify_tlog: true,
             certificate: CertificatePolicy::Verify { verify_sct: true },
+            checkpoint_log_binding: false,
         }
     }
 
@@ -343,6 +379,38 @@ impl VerificationPolicy {
     /// How the signing certificate (and its SCT) is verified.
     pub fn certificate(&self) -> &CertificatePolicy {
         &self.certificate
+    }
+
+    /// Require each checkpoint to be signed by the entry's own log.
+    ///
+    /// By default a checkpoint is accepted when any Rekor key in the trusted
+    /// root signed it, so an entry naming one log can be shown included under
+    /// a checkpoint from another trusted log. With this option, the
+    /// checkpoint must carry a valid signature from the key whose log ID is
+    /// the entry's log ID, and for Rekor v2 its origin must equal the host of
+    /// that log's base URL in the trusted root. Other signature lines, such as
+    /// witness cosignatures, are still ignored.
+    ///
+    /// Limitation: for Rekor v1 entries only the signing key is bound, not the
+    /// checkpoint origin. A Rekor v1 origin includes a tree ID that the
+    /// trusted root does not record, so there is no expected origin to compare
+    /// against.
+    ///
+    /// For Rekor v2 entries, a trusted log whose base URL is not an absolute
+    /// `http(s)` URL with a host (and no user info) has no expected origin,
+    /// and its entries fail verification when this option is set.
+    ///
+    /// This only affects inclusion proof verification, so it has no effect
+    /// when transparency log verification is skipped.
+    pub fn require_checkpoint_log_binding(mut self) -> Self {
+        self.checkpoint_log_binding = true;
+        self
+    }
+
+    /// Whether checkpoints must be signed by the entry's own log; see
+    /// [`Self::require_checkpoint_log_binding`].
+    pub fn requires_checkpoint_log_binding(&self) -> bool {
+        self.checkpoint_log_binding
     }
 }
 
@@ -444,6 +512,7 @@ pub struct Verifier {
     /// Trusted root containing verification material
     trusted_root: TrustedRoot,
     rekor_keys: sigstore_crypto::Keyring,
+    rekor_logs: crate::verify_impl::tlog::RekorLogs,
     pub(crate) ct_keys: Vec<(SigningScheme, sigstore_crypto::Keyring)>,
     pub(crate) fulcio_anchors: Vec<crate::verify_impl::helpers::FulcioAnchor>,
 }
@@ -528,6 +597,7 @@ impl Verifier {
         }
         Ok(Self {
             trusted_root: trusted_root.clone(),
+            rekor_logs: crate::verify_impl::tlog::RekorLogs::new(trusted_root)?,
             rekor_keys,
             ct_keys,
             fulcio_anchors,
@@ -791,6 +861,7 @@ impl Verifier {
             let integrated_time = crate::verify_impl::tlog::verify_tlog_entries(
                 bundle,
                 &self.rekor_keys,
+                policy.checkpoint_log_binding.then_some(&self.rekor_logs),
                 cert_info.not_before,
                 cert_info.not_after,
             )?;
@@ -855,7 +926,11 @@ impl Verifier {
         // SETs) without certificate time validation.
         if policy.verify_tlog {
             for entry in &bundle.verification_material.tlog_entries {
-                crate::verify_impl::tlog::verify_entry_inclusion(entry, &self.rekor_keys)?;
+                crate::verify_impl::tlog::verify_entry_inclusion(
+                    entry,
+                    &self.rekor_keys,
+                    policy.checkpoint_log_binding.then_some(&self.rekor_logs),
+                )?;
 
                 let is_rekor_v1 = matches!(
                     entry.kind_version,
