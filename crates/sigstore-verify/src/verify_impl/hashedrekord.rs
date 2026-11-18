@@ -556,7 +556,7 @@ mod tests {
 
     #[test]
     fn test_key_details_must_match_the_logged_key() {
-        // P-384 key labelled as P-256.
+        // P-384 key labeled as P-256.
         let entry = Entry {
             key_details: "PKIX_ECDSA_P256_SHA_256",
             ..Entry::conforming_p384()
@@ -566,7 +566,7 @@ mod tests {
             "key details PKIX_ECDSA_P256_SHA_256 do not match its EcdsaP384 key",
         );
 
-        // P-256 key labelled as P-384, with an otherwise consistent SHA-384
+        // P-256 key labeled as P-384, with an otherwise consistent SHA-384
         // digest.
         let entry = Entry {
             key_details: "PKIX_ECDSA_P384_SHA_384",
