@@ -6,7 +6,7 @@
 //! rejected one must fail with the recorded error category and message. A
 //! vector failing for any other reason is a test failure.
 //!
-//! Vectors also carry the expected outcome under the managed-key profile described in
+//! Vectors also carry the expected outcome under the managed-key profile in
 //! `test-vectors/managed-key/PROFILE.md`. The [`profile`] module below is a
 //! test-only reference implementation of that profile, so that profile-only
 //! negatives (most of which this library accepts) are also checked to fail for
@@ -114,13 +114,13 @@ fn load(spec: &VectorSpec) -> Vector {
 /// The library outcome: `Ok` or (error category, message).
 type Outcome = Result<(), (String, String)>;
 
-fn verify_library(vector: &Vector, mode: CheckpointBinding) -> Outcome {
+fn verify_library(vector: &Vector, binding: CheckpointBinding) -> Outcome {
     let bundle = Bundle::from_json(&vector.bundle_json)
         .map_err(|error| ("Parse".to_string(), error.to_string()))?;
     verify(
         Artifact::from(vector.artifact.as_slice()),
         &bundle,
-        &mode.policy(vector.key.clone()),
+        &binding.policy(vector.key.clone()),
         &vector.root,
     )
     .map(|_| ())
@@ -168,10 +168,10 @@ fn check_parent(spec: &VectorSpec, by_id: &HashMap<&str, &VectorSpec>, failures:
         let parent = by_id
             .get(parent_id.as_str())
             .unwrap_or_else(|| panic!("{}: unknown parent {parent_id}", spec.id));
-        for mode in CheckpointBinding::ALL {
-            if !matches!(mode.expected(parent), ExpectedLibrary::Accept) {
+        for binding in CheckpointBinding::ALL {
+            if !matches!(binding.expected(parent), ExpectedLibrary::Accept) {
                 failures.push(format!(
-                    "{}: parent {} is not accepted ({mode:?})",
+                    "{}: parent {} is not accepted ({binding:?})",
                     spec.id, parent.id
                 ));
             }
@@ -180,9 +180,9 @@ fn check_parent(spec: &VectorSpec, by_id: &HashMap<&str, &VectorSpec>, failures:
 }
 
 fn check_library(spec: &VectorSpec, vector: &Vector, failures: &mut Vec<String>) {
-    for mode in CheckpointBinding::ALL {
-        if let Err(error) = check(mode.expected(spec), &verify_library(vector, mode)) {
-            failures.push(format!("{} [{mode:?}]: {error}", vector.id));
+    for binding in CheckpointBinding::ALL {
+        if let Err(error) = check(binding.expected(spec), &verify_library(vector, binding)) {
+            failures.push(format!("{} [{binding:?}]: {error}", vector.id));
         }
     }
 }
