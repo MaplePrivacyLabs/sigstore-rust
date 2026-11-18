@@ -4,7 +4,7 @@
 Inputs are the real bundles in `sources/` (produced by the pinned Cosign; see
 README.md) and the trusted roots in `sources/`. Every other vector is derived
 from them here, deterministically: Python's standard library plus the OpenSSL
-command line (Ed25519 signatures, which are deterministic).
+command line (deterministic Ed25519 and RFC 6979 ECDSA signatures).
 
     python3 generate.py            write vectors/, roots/, keys/, artifacts/, manifest.json
     python3 generate.py --check    regenerate into a temporary directory and fail if
@@ -17,6 +17,8 @@ signed with keys derived from fixed public strings. They exist only in
 
 import base64
 import copy
+from dataclasses import dataclass
+from enum import Enum
 import filecmp
 import hashlib
 import json
@@ -30,11 +32,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SOURCES = os.path.join(HERE, "sources")
 OUTPUTS = ("vectors", "roots", "keys", "artifacts", "manifest.json")
 
-# Fixed timestamps for synthetic material (seconds since the epoch).
+# Start of the synthetic logs' validity window (RFC 3339).
 TEST_LOG_START = "2026-01-01T00:00:00Z"
+# Synthetic Rekor v1 integration time (seconds since the epoch).
 V1_INTEGRATED_TIME = 1794873600  # 2026-11-17T00:00:00Z
-
-ERR_CHECKPOINT = "TransparencyLog.Checkpoint"
 
 
 def b64(data):
@@ -55,13 +56,13 @@ def canonical(obj):
 
 
 def load_json(path):
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
+    with open(path, encoding="utf-8") as file:
+        return json.load(file)
 
 
 def pae(payload_type, payload):
-    t = payload_type.encode()
-    return b"DSSEv1 %d %s %d %s" % (len(t), t, len(payload), payload)
+    encoded_type = payload_type.encode()
+    return b"DSSEv1 %d %s %d %s" % (len(encoded_type), encoded_type, len(payload), payload)
 
 
 # ---------------------------------------------------------------------------
@@ -74,6 +75,11 @@ P256_SEC1_PREFIX = bytes.fromhex("30310201010420")
 P256_SEC1_SUFFIX = bytes.fromhex("a00a06082a8648ce3d030107")
 
 
+class RekorVersion(Enum):
+    V1 = 1
+    V2 = 2
+
+
 class TestLog:
     """A synthetic log with a deterministic key.
 
@@ -84,36 +90,48 @@ class TestLog:
     (OpenSSL 3.2 or later).
     """
 
-    def __init__(self, workdir, name, host, v1=False):
+    @classmethod
+    def rekor_v1(cls, workdir, name, host):
+        return cls(workdir, name, host, version=RekorVersion.V1)
+
+    @classmethod
+    def rekor_v2(cls, workdir, name, host):
+        return cls(workdir, name, host, version=RekorVersion.V2)
+
+    def __init__(self, workdir, name, host, *, version):
         self.host = host
         self.base_url = f"https://{host}"
-        self.origin = f"{host} - 1" if v1 else host
-        self.v1 = v1
+        self.origin = f"{host} - 1" if version is RekorVersion.V1 else host
+        self.version = version
         seed = sha256(f"sigstore-rust test vectors: {name} (test-only key, never trust)".encode())
         self.key_path = os.path.join(workdir, f"{name}.pem")
-        if v1:
+        if version is RekorVersion.V1:
             der_path = os.path.join(workdir, f"{name}.der")
-            with open(der_path, "wb") as f:
-                f.write(P256_SEC1_PREFIX + seed + P256_SEC1_SUFFIX)
+            with open(der_path, "wb") as file:
+                file.write(P256_SEC1_PREFIX + seed + P256_SEC1_SUFFIX)
             openssl(["ec", "-inform", "DER", "-in", der_path, "-out", self.key_path])
             self.spki = openssl(["ec", "-in", self.key_path, "-pubout", "-outform", "DER"])
             self.log_id = sha256(self.spki)
             self.key_details = "PKIX_ECDSA_P256_SHA_256"
         else:
-            with open(self.key_path, "w") as f:
-                f.write("-----BEGIN PRIVATE KEY-----\n" + b64(ED25519_PKCS8_PREFIX + seed)
-                        + "\n-----END PRIVATE KEY-----\n")
+            with open(self.key_path, "w") as file:
+                file.write(
+                    (
+                        "-----BEGIN PRIVATE KEY-----\n" + b64(ED25519_PKCS8_PREFIX + seed)
+                        + "\n-----END PRIVATE KEY-----\n"
+                    ),
+                )
             self.spki = openssl(["pkey", "-in", self.key_path, "-pubout", "-outform", "DER"])
             self.log_id = sha256(host.encode() + b"\n\x01" + self.spki[-32:])
             self.key_details = "PKIX_ED25519"
 
     def sign(self, message):
-        with tempfile.NamedTemporaryFile(delete=False) as f:
-            f.write(message)
-            path = f.name
+        with tempfile.NamedTemporaryFile(delete=False) as file:
+            file.write(message)
+            path = file.name
         try:
             args = ["pkeyutl", "-sign", "-inkey", self.key_path, "-rawin", "-in", path]
-            if self.v1:
+            if self.version is RekorVersion.V1:
                 args += ["-digest", "sha256", "-pkeyopt", "nonce-type:1"]
             return openssl(args)
         finally:
@@ -158,30 +176,51 @@ def note_body(origin, size, root):
     return f"{origin}\n{size}\n{b64(root)}\n"
 
 
-def relog(entry, body, log, signers=None, origin=None):
-    """Put `body` at index 1 of a two-leaf tree in `log` and sign the checkpoint.
-
-    `signers` lists (log, name) pairs whose signature lines are appended, in
-    order (default: the log under its own origin). `origin` overrides the
-    origin written in the checkpoint body.
-    """
-    entry = copy.deepcopy(entry)
+def inclusion_proof_for(body, log, *, signers=None, origin=None):
+    """A two-leaf proof and signed checkpoint for `body` at index 1."""
     root, hashes = tree_for(body)
     text = note_body(origin or log.origin, 2, root)
     lines = "".join(
-        signer.signature_line(text, name) for signer, name in (signers or [(log, log.host)])
+        (signer.signature_line(text, name) for signer, name in signers or [(log, log.host)]),
     )
-    entry["logIndex"] = "1"
-    entry["logId"] = {"keyId": b64(log.log_id)}
-    entry["canonicalizedBody"] = b64(body)
-    entry["inclusionProof"] = {
+    return {
         "logIndex": "1",
         "rootHash": b64(root),
         "treeSize": "2",
-        "hashes": [b64(h) for h in hashes],
+        "hashes": [b64(proof_hash) for proof_hash in hashes],
         "checkpoint": {"envelope": text + "\n" + lines},
     }
+
+
+def relog(entry, body, log, *, signers=None, origin=None):
+    """Put `body` at index 1 in `log` and sign the checkpoint.
+
+    `signers` lists (log, name) pairs in signature-line order; the default is
+    the log under its host name (which differs from its origin for Rekor v1).
+    `origin` overrides the origin in the checkpoint body.
+    """
+    entry = copy.deepcopy(entry)
+    entry["logIndex"] = "1"
+    entry["logId"] = {"keyId": b64(log.log_id)}
+    entry["canonicalizedBody"] = b64(body)
+    entry["inclusionProof"] = inclusion_proof_for(body, log, signers=signers, origin=origin)
     return entry
+
+
+def split_checkpoint(text):
+    """Return the note, origin, and signature lines without a trailing empty line."""
+    note, signatures = text.split("\n\n", 1)
+    return note, note.split("\n")[0], signatures.rstrip("\n").split("\n")
+
+
+def join_checkpoint(note, lines):
+    return note + "\n\n" + "\n".join(lines) + "\n"
+
+
+def flip_low_bit(data, index):
+    mutated = bytearray(data)
+    mutated[index] ^= 1
+    return bytes(mutated)
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +251,10 @@ LIBRARY_CODES = (
     ("digest is 32 bytes, expected 48", "tlog-digest-malformed"),
     ("artifact hash mismatch for hashedrekord entry", "tlog-digest-mismatch"),
     ("public key in Rekor entry does not match managed key", "tlog-key-mismatch"),
-    ("DSSE signature in bundle does not match signature in Rekor entry", "tlog-signature-mismatch"),
+    (
+        "DSSE signature in bundle does not match signature in Rekor entry",
+        "tlog-signature-mismatch",
+    ),
 )
 
 # Profile clauses checked before library verification have their own codes. A
@@ -254,86 +296,246 @@ class Corpus:
         self.vectors = []
         self.ids = set()
 
-    def add(self, vid, bundle, *, description, category, source, parent, mutation, key, artifact,
-            root, library, binding=None, profile=None, cosign, raw=None):
-        assert vid not in self.ids, vid
+    def add(
+        self, vector_id, bundle, *, description, category, source, parent, mutation,
+        key, artifact, root, library, binding=None, profile=None, cosign, raw=None,
+    ):
+        """Record a vector and its outcomes in generation order.
+
+        Binding defaults to the library outcome. Profile acceptance is inferred
+        only when both library modes accept; MK-7/MK-8 rejections inherit the
+        binding rejection's reason code. `raw` preserves deliberate duplicate
+        JSON members that a dictionary cannot represent.
+        """
+        assert vector_id not in self.ids, vector_id
         assert category in ("positive", "standard-negative", "binding-negative", "profile-negative")
-        self.ids.add(vid)
+        self.ids.add(vector_id)
         if parent is not None:
-            assert parent in self.ids, f"{vid}: parent {parent} must be defined first"
-        path = f"vectors/{vid}/bundle.sigstore.json"
-        os.makedirs(os.path.join(self.out, "vectors", vid), exist_ok=True)
-        with open(os.path.join(self.out, path), "w", encoding="utf-8") as f:
-            f.write(raw if raw is not None else json.dumps(bundle, indent=2) + "\n")
+            assert parent in self.ids, f"{vector_id}: parent {parent} must be defined first"
+        path = f"vectors/{vector_id}/bundle.sigstore.json"
+        os.makedirs(os.path.join(self.out, "vectors", vector_id), exist_ok=True)
+        with open(os.path.join(self.out, path), "w", encoding="utf-8") as file:
+            file.write(raw if raw is not None else json.dumps(bundle, indent=2) + "\n")
         binding = binding or library
         if profile is None:
             profile = accept() if library["result"] == "accept" and binding["result"] == "accept" else None
-        assert profile is not None, f"{vid}: profile expectation required"
+        assert profile is not None, f"{vector_id}: profile expectation required"
         if profile["result"] == "reject" and "code" not in profile:
-            assert binding["result"] == "reject", f"{vid}: profile reason needs a library rejection"
+            assert binding["result"] == "reject", f"{vector_id}: profile reason needs a library rejection"
             profile = {**profile, "code": binding["code"]}
-        self.vectors.append({
-            "id": vid,
-            "description": description,
-            "category": category,
-            "bundle": path,
-            "trusted_root": f"roots/{root}.json",
-            "key": f"keys/{key}.pub",
-            "artifact": f"artifacts/{artifact}.bin",
-            "source": source,
-            "parent": parent,
-            "mutation": mutation,
-            "expected": {
-                "library": library,
-                "library_checkpoint_log_binding": binding,
-                "profile": profile,
+        self.vectors.append(
+            {
+                "id": vector_id,
+                "description": description,
+                "category": category,
+                "bundle": path,
+                "trusted_root": f'roots/{root}.json',
+                "key": f'keys/{key}.pub',
+                "artifact": f'artifacts/{artifact}.bin',
+                "source": source,
+                "parent": parent,
+                "mutation": mutation,
+                "expected": {
+                    "library": library,
+                    "library_checkpoint_log_binding": binding,
+                    "profile": profile,
+                },
+                "cosign": cosign,
             },
-            "cosign": cosign,
-        })
+        )
 
 
-# ---------------------------------------------------------------------------
-# Generation
-# ---------------------------------------------------------------------------
+DERIVED_SOURCE = {
+    "kind": "derived",
+    "detail": "single documented mutation of the parent, made by generate.py",
+}
+RELOGGED_SOURCE = {
+    "kind": "derived",
+    "detail": (
+        "parent's log entry re-logged in a synthetic test log (roots/test.json) by "
+        "generate.py"
+    ),
+}
+
+
+@dataclass
+class ParentVector:
+    id: str
+    bundle: dict
+    key: str
+    artifact: str
+    root: str
+
+    def add_mutation(self, corpus, vector_id, bundle, *, key=None, root=None, **details):
+        """Use this parent's ID/key/artifact/root unless explicitly overridden."""
+        corpus.add(
+            vector_id,
+            bundle,
+            source=DERIVED_SOURCE,
+            parent=self.id,
+            key=key or self.key,
+            artifact=self.artifact,
+            root=root or self.root,
+            **details,
+        )
+
+
+def log_entry(bundle):
+    return bundle["verificationMaterial"]["tlogEntries"][0]
+
+
+def entry_body(bundle):
+    return json.loads(unb64(log_entry(bundle)["canonicalizedBody"]))
+
+
+def real_source(runs, run):
+    return {"kind": "real", "detail": runs[run]["provenance"]["detail"]}
+
+
+def production_v1_log_id(production):
+    logs = [log for log in production["tlogs"] if log["baseUrl"] == "https://rekor.sigstore.dev"]
+    assert len(logs) == 1
+    return logs[0]["logId"]["keyId"]
+
+
+def add_relogged_vector(corpus, log, parent, vector_id, *, description):
+    bundle = copy.deepcopy(parent.bundle)
+    body = unb64(log_entry(bundle)["canonicalizedBody"])
+    bundle["verificationMaterial"]["tlogEntries"][0] = relog(log_entry(bundle), body, log)
+    corpus.add(
+        vector_id,
+        bundle,
+        description=description,
+        category="positive",
+        source=RELOGGED_SOURCE,
+        parent=parent.id,
+        mutation="re-log the unchanged entry body at index 1 of a two-leaf tree in test log A",
+        key=parent.key,
+        artifact=parent.artifact,
+        root="test",
+        library=accept(),
+        cosign="accept",
+    )
+    return ParentVector(
+        id=vector_id,
+        bundle=bundle,
+        key=parent.key,
+        artifact=parent.artifact,
+        root="test",
+    )
+
+
+def add_body_mutation(corpus, log, parent, vector_id, *, change, description, mutation, library):
+    bundle = copy.deepcopy(parent.bundle)
+    body = entry_body(bundle)
+    change(body["spec"]["hashedRekordV002"])
+    bundle["verificationMaterial"]["tlogEntries"][0] = relog(log_entry(bundle), canonical(body), log)
+    parent.add_mutation(
+        corpus,
+        vector_id,
+        bundle,
+        description=description,
+        category="standard-negative",
+        mutation=mutation + "; re-log the changed body in test log A",
+        library=library,
+        profile=profile_reject("MK-8", "library verification fails"),
+        cosign="reject",
+    )
+
+
+def set_field(path, value):
+    def change(spec):
+        node = spec
+        for key in path[:-1]:
+            node = node[key]
+        node[path[-1]] = value
+    return change
+
+
+def combine_mutations(*changes):
+    def change(spec):
+        for mutation in changes:
+            mutation(spec)
+    return change
 
 
 def generate(out):
-    work = tempfile.mkdtemp()
-    try:
-        _generate(out, work)
-    finally:
-        shutil.rmtree(work)
+    with tempfile.TemporaryDirectory() as work:
+        prepare_outputs(out)
+        runs = load_runs(out)
+        log_a = TestLog.rekor_v2(work, "test-log-a", "test-log-a.rekor.example.com")
+        log_b = TestLog.rekor_v2(work, "test-log-b", "test-log-b.rekor.example.com")
+        log_v1 = TestLog.rekor_v1(work, "test-log-v1", "test-log-v1.rekor.example.com")
+        production = write_roots(out, log_a=log_a, log_b=log_b, log_v1=log_v1)
+        corpus = Corpus(out)
+        first = ParentVector(
+            id="p384-rekor2-dsse-tsa",
+            bundle=runs["r1"]["bundle"],
+            key="r1",
+            artifact="r1",
+            root="production",
+        )
+        second = ParentVector(
+            id="p384-rekor2-dsse-tsa-second-key",
+            bundle=runs["r2"]["bundle"],
+            key="r2",
+            artifact="r2",
+            root="production",
+        )
+        third = ParentVector(
+            id="p256-rekor2-dsse-tsa",
+            bundle=runs["r3"]["bundle"],
+            key="r3",
+            artifact="r3",
+            root="production",
+        )
+        add_real_positives(corpus, runs, first=first, second=second, third=third)
+        add_standard_negatives(corpus, first=first, second=second, production=production)
+        add_profile_negatives(corpus, first=first, second=second)
+        relogged_parent = add_relogged_vectors(corpus, first=first, second=second, third=third, log=log_a)
+        add_binding_negatives(corpus, relogged_parent=relogged_parent, log_a=log_a, log_b=log_b)
+        add_rekor_v1_vector(corpus, first=first, log_v1=log_v1)
+        add_p256_binding_vector(corpus, third=third, production=production)
+        write_manifest(out, corpus, runs, logs=(log_a, log_b, log_v1))
 
 
-def _generate(out, work):
+def prepare_outputs(out):
     for name in OUTPUTS:
         path = os.path.join(out, name)
         if os.path.isdir(path):
             shutil.rmtree(path)
         elif os.path.exists(path):
             os.unlink(path)
-    for d in ("roots", "keys", "artifacts"):
-        os.makedirs(os.path.join(out, d))
+    for directory in ("roots", "keys", "artifacts"):
+        os.makedirs(os.path.join(out, directory))
 
+
+def load_runs(out):
     runs = {}
     for run in ("r1", "r2", "r3"):
-        src = os.path.join(SOURCES, run)
+        source_dir = os.path.join(SOURCES, run)
         runs[run] = {
-            "bundle": load_json(os.path.join(src, "bundle.sigstore.json")),
-            "provenance": load_json(os.path.join(src, "provenance.json")),
+            "bundle": load_json(os.path.join(source_dir, "bundle.sigstore.json")),
+            "provenance": load_json(os.path.join(source_dir, "provenance.json")),
         }
-        shutil.copyfile(os.path.join(src, "key.pub"), os.path.join(out, "keys", f"{run}.pub"))
-        shutil.copyfile(os.path.join(src, "artifact.bin"), os.path.join(out, "artifacts", f"{run}.bin"))
+        shutil.copyfile(os.path.join(source_dir, "key.pub"), os.path.join(out, "keys", f"{run}.pub"))
+        shutil.copyfile(
+            os.path.join(source_dir, "artifact.bin"),
+            os.path.join(out, "artifacts", f'{run}.bin'),
+        )
+    return runs
 
-    # Trusted roots.
+
+def write_roots(out, *, log_a, log_b, log_v1):
     production = load_json(os.path.join(SOURCES, "trusted_root.production.json"))
     staging = load_json(os.path.join(SOURCES, "trusted_root.staging.json"))
-    log_a = TestLog(work, "test-log-a", "test-log-a.rekor.example.com")
-    log_b = TestLog(work, "test-log-b", "test-log-b.rekor.example.com")
-    log_v1 = TestLog(work, "test-log-v1", "test-log-v1.rekor.example.com", v1=True)
     test_root = {
         "mediaType": production["mediaType"],
-        "tlogs": [log_a.trusted_root_entry(), log_b.trusted_root_entry(), log_v1.trusted_root_entry()],
+        "tlogs": [
+            log_a.trusted_root_entry(),
+            log_b.trusted_root_entry(),
+            log_v1.trusted_root_entry(),
+        ],
         "certificateAuthorities": [],
         "ctlogs": [],
         "timestampAuthorities": copy.deepcopy(production["timestampAuthorities"]),
@@ -342,470 +544,836 @@ def _generate(out, work):
     untrusted_tsa["timestampAuthorities"] = copy.deepcopy(staging["timestampAuthorities"])
     for name, root in (("production", production), ("test", test_root),
                        ("production-staging-tsa", untrusted_tsa)):
-        with open(os.path.join(out, "roots", f"{name}.json"), "w", encoding="utf-8") as f:
-            f.write(json.dumps(root, indent=2) + "\n")
+        with open(os.path.join(out, "roots", f"{name}.json"), "w", encoding="utf-8") as file:
+            file.write(json.dumps(root, indent=2) + "\n")
+    return production
 
-    c = Corpus(out)
-    r1, r2, r3 = (runs[r]["bundle"] for r in ("r1", "r2", "r3"))
 
-    def real(run):
-        p = runs[run]["provenance"]
-        return {"kind": "real", "detail": p["detail"]}
-
-    derived = {"kind": "derived", "detail": "single documented mutation of the parent, made by generate.py"}
-    relogged = {"kind": "derived", "detail": "parent's log entry re-logged in a synthetic test log (roots/test.json) by generate.py"}
-
-    def entry(b):
-        return b["verificationMaterial"]["tlogEntries"][0]
-
-    def body_of(b):
-        return json.loads(unb64(entry(b)["canonicalizedBody"]))
-
-    # ---- Real positives -------------------------------------------------
-    c.add("p384-rekor2-dsse-tsa", r1, description="P-384 managed key, DSSE in-toto statement, Rekor v2 hashedrekord 0.0.2 entry, RFC 3161 timestamp",
-          category="positive", source=real("r1"), parent=None, mutation=None, key="r1", artifact="r1",
-          root="production", library=accept(), cosign="accept")
-    c.add("p384-rekor2-dsse-tsa-second-key", r2, description="Second P-384 positive: different key and statement",
-          category="positive", source=real("r2"), parent=None, mutation=None, key="r2", artifact="r2",
-          root="production", library=accept(), cosign="accept")
-    c.add("p256-rekor2-dsse-tsa", r3, description="P-256 managed key, DSSE, Rekor v2, RFC 3161 timestamp",
-          category="positive", source=real("r3"), parent=None, mutation=None, key="r3", artifact="r3",
-          root="production", library=accept(), cosign="accept")
+def add_real_positives(corpus, runs, *, first, second, third):
+    corpus.add(
+        "p384-rekor2-dsse-tsa",
+        first.bundle,
+        description=(
+            "P-384 managed key, DSSE in-toto statement, Rekor v2 hashedrekord "
+            "0.0.2 entry, RFC 3161 timestamp"
+        ),
+        category="positive",
+        source=real_source(runs, "r1"),
+        parent=None,
+        mutation=None,
+        key="r1",
+        artifact="r1",
+        root="production",
+        library=accept(),
+        cosign="accept",
+    )
+    corpus.add(
+        "p384-rekor2-dsse-tsa-second-key",
+        second.bundle,
+        description="Second P-384 positive: different key and statement",
+        category="positive",
+        source=real_source(runs, "r2"),
+        parent=None,
+        mutation=None,
+        key="r2",
+        artifact="r2",
+        root="production",
+        library=accept(),
+        cosign="accept",
+    )
+    corpus.add(
+        "p256-rekor2-dsse-tsa",
+        third.bundle,
+        description="P-256 managed key, DSSE, Rekor v2, RFC 3161 timestamp",
+        category="positive",
+        source=real_source(runs, "r3"),
+        parent=None,
+        mutation=None,
+        key="r3",
+        artifact="r3",
+        root="production",
+        library=accept(),
+        cosign="accept",
+    )
 
     # Checkpoint witness lines are neither verified nor required.
-    b = copy.deepcopy(r1)
-    cp = entry(b)["inclusionProof"]["checkpoint"]["envelope"]
-    head, sigs = cp.split("\n\n", 1)
-    lines = [l for l in sigs.split("\n") if l]
-    log_line = [l for l in lines if l.split(" ")[1] == head.split("\n")[0]]
-    assert len(log_line) == 1 and len(lines) > 1, "expected one log signature plus witness lines"
-    entry(b)["inclusionProof"]["checkpoint"]["envelope"] = head + "\n\n" + log_line[0] + "\n"
-    c.add("p384-checkpoint-witnesses-removed", b, description="Checkpoint keeps only the log's own signature line",
-          category="positive", source=derived, parent="p384-rekor2-dsse-tsa",
-          mutation="remove every witness cosignature line from the checkpoint", key="r1", artifact="r1",
-          root="production", library=accept(), cosign="accept")
-    b = copy.deepcopy(r1)
-    others = [l for l in lines if l not in log_line]
-    entry(b)["inclusionProof"]["checkpoint"]["envelope"] = head + "\n\n" + "\n".join(others + log_line) + "\n"
-    c.add("p384-checkpoint-log-signature-last", b, description="Log signature line after the witness lines",
-          category="positive", source=derived, parent="p384-rekor2-dsse-tsa",
-          mutation="move the log's signature line after the witness cosignature lines", key="r1", artifact="r1",
-          root="production", library=accept(), cosign="accept")
+    bundle = copy.deepcopy(first.bundle)
+    checkpoint = log_entry(bundle)["inclusionProof"]["checkpoint"]["envelope"]
+    note, origin, lines = split_checkpoint(checkpoint)
+    log_lines = [line for line in lines if line.split(" ")[1] == origin]
+    assert len(log_lines) == 1 and len(lines) > 1, "expected one log signature plus witness lines"
+    log_entry(bundle)["inclusionProof"]["checkpoint"]["envelope"] = join_checkpoint(note, log_lines)
+    first.add_mutation(
+        corpus,
+        "p384-checkpoint-witnesses-removed",
+        bundle,
+        description="Checkpoint keeps only the log's own signature line",
+        category="positive",
+        mutation="remove every witness cosignature line from the checkpoint",
+        library=accept(),
+        cosign="accept",
+    )
+    bundle = copy.deepcopy(first.bundle)
+    others = [line for line in lines if line not in log_lines]
+    log_entry(bundle)["inclusionProof"]["checkpoint"]["envelope"] = join_checkpoint(note, others + log_lines)
+    first.add_mutation(
+        corpus,
+        "p384-checkpoint-log-signature-last",
+        bundle,
+        description="Log signature line after the witness lines",
+        category="positive",
+        mutation="move the log's signature line after the witness cosignature lines",
+        library=accept(),
+        cosign="accept",
+    )
 
-    # ---- Standard negatives on the real P-384 bundle ----------------------
-    b = copy.deepcopy(r1)
-    statement = json.loads(unb64(b["dsseEnvelope"]["payload"]))
+
+def add_standard_negatives(corpus, *, first, second, production):
+    bundle = copy.deepcopy(first.bundle)
+    statement = json.loads(unb64(bundle["dsseEnvelope"]["payload"]))
     pcr0 = statement["predicate"]["measurements"]["PCR0"]
     statement["predicate"]["measurements"]["PCR0"] = ("0" if pcr0[0] != "0" else "1") + pcr0[1:]
-    b["dsseEnvelope"]["payload"] = b64(json.dumps(statement, indent=2).encode() + b"\n")
-    c.add("p384-payload-pcr-tampered", b, description="Signed statement altered: one PCR0 digit changed",
-          category="standard-negative", source=derived, parent="p384-rekor2-dsse-tsa",
-          mutation="change the first hex digit of predicate.measurements.PCR0 in the DSSE payload",
-          key="r1", artifact="r1", root="production",
-          library=reject("SignatureInvalid", "DSSE signature verification failed"),
-          profile=profile_reject("MK-8", "library verification fails"), cosign="reject")
+    bundle["dsseEnvelope"]["payload"] = b64(json.dumps(statement, indent=2).encode() + b"\n")
+    first.add_mutation(
+        corpus,
+        "p384-payload-pcr-tampered",
+        bundle,
+        description="Signed statement altered: one PCR0 digit changed",
+        category="standard-negative",
+        mutation="change the first hex digit of predicate.measurements.PCR0 in the DSSE payload",
+        library=reject("SignatureInvalid", "DSSE signature verification failed"),
+        profile=profile_reject("MK-8", "library verification fails"),
+        cosign="reject",
+    )
 
-    b = copy.deepcopy(r1)
-    b["dsseEnvelope"]["signatures"][0]["sig"] = r2["dsseEnvelope"]["signatures"][0]["sig"]
-    b["verificationMaterial"]["timestampVerificationData"] = copy.deepcopy(r2["verificationMaterial"]["timestampVerificationData"])
-    c.add("p384-signature-substituted", b, description="DSSE signature replaced by another key's valid signature over another statement, with that signature's own timestamp",
-          category="standard-negative", source=derived, parent="p384-rekor2-dsse-tsa",
-          mutation="replace the DSSE signature and the RFC 3161 timestamp with those of p384-rekor2-dsse-tsa-second-key",
-          key="r1", artifact="r1", root="production",
-          library=reject("SignatureInvalid", "DSSE signature verification failed"),
-          profile=profile_reject("MK-8", "library verification fails"), cosign="reject")
+    bundle = copy.deepcopy(first.bundle)
+    bundle["dsseEnvelope"]["signatures"][0]["sig"] = second.bundle["dsseEnvelope"]["signatures"][0]["sig"]
+    bundle["verificationMaterial"]["timestampVerificationData"] = copy.deepcopy(
+        second.bundle["verificationMaterial"]["timestampVerificationData"]
+    )
+    first.add_mutation(
+        corpus,
+        "p384-signature-substituted",
+        bundle,
+        description=(
+            "DSSE signature replaced by another key's valid signature over "
+            "another statement, with that signature's own timestamp"
+        ),
+        category="standard-negative",
+        mutation=(
+            "replace the DSSE signature and the RFC 3161 timestamp with those of "
+            "p384-rekor2-dsse-tsa-second-key"
+        ),
+        library=reject("SignatureInvalid", "DSSE signature verification failed"),
+        profile=profile_reject("MK-8", "library verification fails"),
+        cosign="reject",
+    )
 
-    b = copy.deepcopy(r1)
-    b["verificationMaterial"]["publicKey"]["hint"] = r2["verificationMaterial"]["publicKey"]["hint"]
-    c.add("p384-verified-with-other-key", b, description="Bundle checked against a different approved key (e.g. another environment's), with that key's hint",
-          category="standard-negative", source=derived, parent="p384-rekor2-dsse-tsa",
-          mutation="set publicKey.hint to the second key's hint and verify with the second key",
-          key="r2", artifact="r1", root="production",
-          library=reject("SignatureInvalid", "DSSE signature verification failed"),
-          profile=profile_reject("MK-8", "library verification fails"), cosign="reject")
+    bundle = copy.deepcopy(first.bundle)
+    bundle["verificationMaterial"]["publicKey"]["hint"] = second.bundle["verificationMaterial"]["publicKey"]["hint"]
+    first.add_mutation(
+        corpus,
+        "p384-verified-with-other-key",
+        bundle,
+        description=(
+            "Bundle checked against a different approved key (e.g. another "
+            "environment's), with that key's hint"
+        ),
+        category="standard-negative",
+        mutation="set publicKey.hint to the second key's hint and verify with the second key",
+        key="r2",
+        library=reject("SignatureInvalid", "DSSE signature verification failed"),
+        profile=profile_reject("MK-8", "library verification fails"),
+        cosign="reject",
+    )
 
-    b = copy.deepcopy(r1)
-    proof = entry(b)["inclusionProof"]
-    h = bytearray(unb64(proof["hashes"][0]))
-    h[0] ^= 1
-    proof["hashes"][0] = b64(bytes(h))
-    c.add("p384-inclusion-proof-corrupted", b, description="One inclusion proof hash altered",
-          category="standard-negative", source=derived, parent="p384-rekor2-dsse-tsa",
-          mutation="flip the low bit of the first byte of inclusionProof.hashes[0]",
-          key="r1", artifact="r1", root="production",
-          library=reject("TransparencyLog.InclusionProof", "inclusion proof verification failed"),
-          profile=profile_reject("MK-8", "library verification fails"), cosign="reject")
+    bundle = copy.deepcopy(first.bundle)
+    proof = log_entry(bundle)["inclusionProof"]
+    proof["hashes"][0] = b64(flip_low_bit(unb64(proof["hashes"][0]), 0))
+    first.add_mutation(
+        corpus,
+        "p384-inclusion-proof-corrupted",
+        bundle,
+        description="One inclusion proof hash altered",
+        category="standard-negative",
+        mutation="flip the low bit of the first byte of inclusionProof.hashes[0]",
+        library=reject("TransparencyLog.InclusionProof", "inclusion proof verification failed"),
+        profile=profile_reject("MK-8", "library verification fails"),
+        cosign="reject",
+    )
 
-    b = copy.deepcopy(r1)
-    del entry(b)["inclusionProof"]
-    c.add("p384-inclusion-proof-removed", b, description="The only log entry has no inclusion proof",
-          category="standard-negative", source=derived, parent="p384-rekor2-dsse-tsa",
-          mutation="remove inclusionProof from the log entry",
-          key="r1", artifact="r1", root="production",
-          library=reject("Bundle", "bundle must have an inclusion proof"),
-          profile=profile_reject("MK-8", "library verification fails"), cosign="reject")
+    bundle = copy.deepcopy(first.bundle)
+    del log_entry(bundle)["inclusionProof"]
+    first.add_mutation(
+        corpus,
+        "p384-inclusion-proof-removed",
+        bundle,
+        description="The only log entry has no inclusion proof",
+        category="standard-negative",
+        mutation="remove inclusionProof from the log entry",
+        library=reject("Bundle", "bundle must have an inclusion proof"),
+        profile=profile_reject("MK-8", "library verification fails"),
+        cosign="reject",
+    )
 
-    b = copy.deepcopy(r1)
-    cp = entry(b)["inclusionProof"]["checkpoint"]["envelope"]
-    head, sigs = cp.split("\n\n", 1)
-    origin = head.split("\n")[0]
+    bundle = copy.deepcopy(first.bundle)
+    checkpoint = log_entry(bundle)["inclusionProof"]["checkpoint"]["envelope"]
+    note, origin, lines = split_checkpoint(checkpoint)
     new_lines = []
-    for l in sigs.split("\n"):
-        if l and l.split(" ")[1] == origin:
-            raw = bytearray(unb64(l.split(" ")[2]))
-            raw[-1] ^= 1
-            l = f"— {origin} {b64(bytes(raw))}"
-        new_lines.append(l)
-    entry(b)["inclusionProof"]["checkpoint"]["envelope"] = head + "\n\n" + "\n".join(new_lines)
-    c.add("p384-checkpoint-signature-corrupted", b, description="The log's checkpoint signature altered",
-          category="standard-negative", source=derived, parent="p384-rekor2-dsse-tsa",
-          mutation="flip the low bit of the last byte of the log's checkpoint signature",
-          key="r1", artifact="r1", root="production",
-          library=reject(ERR_CHECKPOINT, "No valid Rekor signature found on checkpoint"),
-          binding=reject(ERR_CHECKPOINT, "checkpoint has no valid signature from the entry's log"),
-          profile=profile_reject("MK-8", "library verification fails"), cosign="reject")
+    for line in lines:
+        if line and line.split(" ")[1] == origin:
+            signature = flip_low_bit(unb64(line.split(" ")[2]), -1)
+            line = f"— {origin} {b64(signature)}"
+        new_lines.append(line)
+    log_entry(bundle)["inclusionProof"]["checkpoint"]["envelope"] = join_checkpoint(note, new_lines)
+    first.add_mutation(
+        corpus,
+        "p384-checkpoint-signature-corrupted",
+        bundle,
+        description="The log's checkpoint signature altered",
+        category="standard-negative",
+        mutation="flip the low bit of the last byte of the log's checkpoint signature",
+        library=reject(
+            "TransparencyLog.Checkpoint",
+            "No valid Rekor signature found on checkpoint",
+        ),
+        binding=reject(
+            "TransparencyLog.Checkpoint",
+            "checkpoint has no valid signature from the entry's log",
+        ),
+        profile=profile_reject("MK-8", "library verification fails"),
+        cosign="reject",
+    )
 
-    b = copy.deepcopy(r1)
-    cp = entry(b)["inclusionProof"]["checkpoint"]["envelope"]
-    head, sigs = cp.split("\n\n", 1)
-    origin = head.split("\n")[0]
-    kept = [l for l in sigs.split("\n") if l and l.split(" ")[1] != origin]
-    entry(b)["inclusionProof"]["checkpoint"]["envelope"] = head + "\n\n" + "\n".join(kept) + "\n"
-    c.add("p384-checkpoint-log-signature-removed", b, description="Checkpoint carries only witness cosignatures",
-          category="standard-negative", source=derived, parent="p384-rekor2-dsse-tsa",
-          mutation="remove the log's own signature line from the checkpoint, keeping the witness lines",
-          key="r1", artifact="r1", root="production",
-          library=reject(ERR_CHECKPOINT, "No matching Rekor key found for checkpoint signature"),
-          binding=reject(ERR_CHECKPOINT, "checkpoint has no valid signature from the entry's log"),
-          profile=profile_reject("MK-8", "library verification fails"), cosign="reject")
+    bundle = copy.deepcopy(first.bundle)
+    checkpoint = log_entry(bundle)["inclusionProof"]["checkpoint"]["envelope"]
+    note, origin, lines = split_checkpoint(checkpoint)
+    kept = [line for line in lines if line.split(" ")[1] != origin]
+    log_entry(bundle)["inclusionProof"]["checkpoint"]["envelope"] = join_checkpoint(note, kept)
+    first.add_mutation(
+        corpus,
+        "p384-checkpoint-log-signature-removed",
+        bundle,
+        description="Checkpoint carries only witness cosignatures",
+        category="standard-negative",
+        mutation=(
+            "remove the log's own signature line from the checkpoint, keeping the "
+            "witness lines"
+        ),
+        library=reject(
+            "TransparencyLog.Checkpoint",
+            "No matching Rekor key found for checkpoint signature",
+        ),
+        binding=reject(
+            "TransparencyLog.Checkpoint",
+            "checkpoint has no valid signature from the entry's log",
+        ),
+        profile=profile_reject("MK-8", "library verification fails"),
+        cosign="reject",
+    )
 
-    b = copy.deepcopy(r1)
-    cp = entry(b)["inclusionProof"]["checkpoint"]["envelope"]
-    cp_lines = cp.split("\n")
-    root_bytes = bytearray(unb64(cp_lines[2]))
-    root_bytes[0] ^= 1
-    cp_lines[2] = b64(bytes(root_bytes))
-    entry(b)["inclusionProof"]["checkpoint"]["envelope"] = "\n".join(cp_lines)
-    c.add("p384-checkpoint-root-hash-altered", b, description="Checkpoint root hash altered (signature no longer covers it)",
-          category="standard-negative", source=derived, parent="p384-rekor2-dsse-tsa",
-          mutation="flip the low bit of the first byte of the checkpoint root hash",
-          key="r1", artifact="r1", root="production",
-          library=reject("TransparencyLog.InclusionProof", "inclusion proof verification failed"),
-          profile=profile_reject("MK-8", "library verification fails"), cosign="reject")
+    bundle = copy.deepcopy(first.bundle)
+    checkpoint = log_entry(bundle)["inclusionProof"]["checkpoint"]["envelope"]
+    checkpoint_lines = checkpoint.split("\n")
+    checkpoint_lines[2] = b64(flip_low_bit(unb64(checkpoint_lines[2]), 0))
+    log_entry(bundle)["inclusionProof"]["checkpoint"]["envelope"] = "\n".join(checkpoint_lines)
+    first.add_mutation(
+        corpus,
+        "p384-checkpoint-root-hash-altered",
+        bundle,
+        description="Checkpoint root hash altered (signature no longer covers it)",
+        category="standard-negative",
+        mutation="flip the low bit of the first byte of the checkpoint root hash",
+        library=reject("TransparencyLog.InclusionProof", "inclusion proof verification failed"),
+        profile=profile_reject("MK-8", "library verification fails"),
+        cosign="reject",
+    )
 
-    b = copy.deepcopy(r1)
-    v1_production = [t for t in production["tlogs"] if t["baseUrl"] == "https://rekor.sigstore.dev"]
-    assert len(v1_production) == 1
-    entry(b)["logId"] = {"keyId": v1_production[0]["logId"]["keyId"]}
-    c.add("p384-entry-names-another-trusted-log", b, description="Entry's log ID points at another log in the trusted root (Rekor v1 production); the checkpoint is still the real one from log2025-1",
-          category="binding-negative", source=derived, parent="p384-rekor2-dsse-tsa",
-          mutation="set logId.keyId to the trusted root's rekor.sigstore.dev log ID",
-          key="r1", artifact="r1", root="production",
-          library=accept(),
-          binding=reject(ERR_CHECKPOINT, "does not match the entry's log \"rekor.sigstore.dev\""),
-          profile=profile_reject("MK-8", "checkpoint is not from the entry's log"), cosign="reject")
+    bundle = copy.deepcopy(first.bundle)
+    log_entry(bundle)["logId"] = {"keyId": production_v1_log_id(production)}
+    first.add_mutation(
+        corpus,
+        "p384-entry-names-another-trusted-log",
+        bundle,
+        description=(
+            "Entry's log ID points at another log in the trusted root (Rekor v1 "
+            "production); the checkpoint is still the real one from log2025-1"
+        ),
+        category="binding-negative",
+        mutation="set logId.keyId to the trusted root's rekor.sigstore.dev log ID",
+        library=accept(),
+        binding=reject(
+            "TransparencyLog.Checkpoint",
+            "does not match the entry's log \"rekor.sigstore.dev\"",
+        ),
+        profile=profile_reject("MK-8", "checkpoint is not from the entry's log"),
+        cosign="reject",
+    )
 
-    b = copy.deepcopy(r1)
-    tok = bytearray(unb64(b["verificationMaterial"]["timestampVerificationData"]["rfc3161Timestamps"][0]["signedTimestamp"]))
-    tok[-1] ^= 1
-    b["verificationMaterial"]["timestampVerificationData"]["rfc3161Timestamps"][0]["signedTimestamp"] = b64(bytes(tok))
-    c.add("p384-timestamp-tampered", b, description="RFC 3161 timestamp token altered",
-          category="standard-negative", source=derived, parent="p384-rekor2-dsse-tsa",
-          mutation="flip the low bit of the last byte of the timestamp token (its signature)",
-          key="r1", artifact="r1", root="production",
-          library=reject("Timestamp.Invalid", "Failed to verify timestamp signature: Verification error: ECDSA_P384_SHA256 signature invalid"),
-          profile=profile_reject("MK-7", "the timestamp does not verify"), cosign="reject")
+    bundle = copy.deepcopy(first.bundle)
+    timestamp = bundle["verificationMaterial"]["timestampVerificationData"]["rfc3161Timestamps"][0]
+    timestamp["signedTimestamp"] = b64(flip_low_bit(unb64(timestamp["signedTimestamp"]), -1))
+    first.add_mutation(
+        corpus,
+        "p384-timestamp-tampered",
+        bundle,
+        description="RFC 3161 timestamp token altered",
+        category="standard-negative",
+        mutation="flip the low bit of the last byte of the timestamp token (its signature)",
+        library=reject(
+            "Timestamp.Invalid",
+            (
+                "Failed to verify timestamp signature: Verification error: "
+                "ECDSA_P384_SHA256 signature invalid"
+            ),
+        ),
+        profile=profile_reject("MK-7", "the timestamp does not verify"),
+        cosign="reject",
+    )
 
-    c.add("p384-timestamp-untrusted-authority", r1, description="Unmodified bundle checked against a trusted root whose timestamp authority is a different one (Sigstore staging)",
-          category="standard-negative", source=derived, parent="p384-rekor2-dsse-tsa",
-          mutation="trusted root only: replace timestampAuthorities with the staging root's",
-          key="r1", artifact="r1", root="production-staging-tsa",
-          library=reject("Timestamp.Invalid", "CMS signer does not match any trusted TSA certificate"),
-          profile=profile_reject("MK-7", "the timestamp does not verify"), cosign="reject")
+    first.add_mutation(
+        corpus,
+        "p384-timestamp-untrusted-authority",
+        first.bundle,
+        description=(
+            "Unmodified bundle checked against a trusted root whose timestamp "
+            "authority is a different one (Sigstore staging)"
+        ),
+        category="standard-negative",
+        mutation="trusted root only: replace timestampAuthorities with the staging root's",
+        root="production-staging-tsa",
+        library=reject(
+            "Timestamp.Invalid",
+            "CMS signer does not match any trusted TSA certificate",
+        ),
+        profile=profile_reject("MK-7", "the timestamp does not verify"),
+        cosign="reject",
+    )
 
-    b = copy.deepcopy(r1)
-    b["verificationMaterial"]["timestampVerificationData"] = copy.deepcopy(r2["verificationMaterial"]["timestampVerificationData"])
-    c.add("p384-timestamp-from-other-signature", b, description="A valid timestamp from the same authority, but over a different signature",
-          category="standard-negative", source=derived, parent="p384-rekor2-dsse-tsa",
-          mutation="replace the RFC 3161 timestamp with p384-rekor2-dsse-tsa-second-key's",
-          key="r1", artifact="r1", root="production",
-          library=reject("Timestamp.Invalid", "Timestamp message hash mismatch"),
-          profile=profile_reject("MK-7", "the timestamp does not verify"), cosign="reject")
+    bundle = copy.deepcopy(first.bundle)
+    bundle["verificationMaterial"]["timestampVerificationData"] = copy.deepcopy(
+        second.bundle["verificationMaterial"]["timestampVerificationData"]
+    )
+    first.add_mutation(
+        corpus,
+        "p384-timestamp-from-other-signature",
+        bundle,
+        description="A valid timestamp from the same authority, but over a different signature",
+        category="standard-negative",
+        mutation="replace the RFC 3161 timestamp with p384-rekor2-dsse-tsa-second-key's",
+        library=reject("Timestamp.Invalid", "Timestamp message hash mismatch"),
+        profile=profile_reject("MK-7", "the timestamp does not verify"),
+        cosign="reject",
+    )
 
-    # ---- Profile-only negatives -----------------------------------------
-    b = copy.deepcopy(r1)
-    b["verificationMaterial"]["timestampVerificationData"] = {"rfc3161Timestamps": []}
-    c.add("p384-timestamp-removed", b, description="No RFC 3161 timestamp",
-          category="profile-negative", source=derived, parent="p384-rekor2-dsse-tsa",
-          mutation="empty timestampVerificationData.rfc3161Timestamps",
-          key="r1", artifact="r1", root="production", library=accept(),
-          profile=profile_reject("MK-7", "exactly one timestamp is required"), cosign="reject")
 
-    b = copy.deepcopy(r1)
-    ts = b["verificationMaterial"]["timestampVerificationData"]["rfc3161Timestamps"]
-    ts.append(copy.deepcopy(ts[0]))
-    c.add("p384-timestamp-duplicated", b, description="The same timestamp twice",
-          category="profile-negative", source=derived, parent="p384-rekor2-dsse-tsa",
-          mutation="append a second copy of the RFC 3161 timestamp",
-          key="r1", artifact="r1", root="production", library=accept(),
-          profile=profile_reject("MK-7", "exactly one timestamp is required"), cosign=None)
+def add_profile_negatives(corpus, *, first, second):
+    bundle = copy.deepcopy(first.bundle)
+    bundle["verificationMaterial"]["timestampVerificationData"] = {"rfc3161Timestamps": []}
+    first.add_mutation(
+        corpus,
+        "p384-timestamp-removed",
+        bundle,
+        description="No RFC 3161 timestamp",
+        category="profile-negative",
+        mutation="empty timestampVerificationData.rfc3161Timestamps",
+        library=accept(),
+        profile=profile_reject("MK-7", "exactly one timestamp is required"),
+        cosign="reject",
+    )
 
-    b = copy.deepcopy(r1)
-    b["verificationMaterial"]["tlogEntries"].append(copy.deepcopy(entry(r1)))
-    c.add("p384-tlog-entry-duplicated", b, description="The same log entry twice",
-          category="profile-negative", source=derived, parent="p384-rekor2-dsse-tsa",
-          mutation="append a second copy of the log entry",
-          key="r1", artifact="r1", root="production", library=accept(),
-          profile=profile_reject("MK-5", "exactly one log entry is required"), cosign=None)
+    bundle = copy.deepcopy(first.bundle)
+    timestamps = bundle["verificationMaterial"]["timestampVerificationData"]["rfc3161Timestamps"]
+    timestamps.append(copy.deepcopy(timestamps[0]))
+    first.add_mutation(
+        corpus,
+        "p384-timestamp-duplicated",
+        bundle,
+        description="The same timestamp twice",
+        category="profile-negative",
+        mutation="append a second copy of the RFC 3161 timestamp",
+        library=accept(),
+        profile=profile_reject("MK-7", "exactly one timestamp is required"),
+        cosign=None,
+    )
 
-    b = copy.deepcopy(r1)
-    extra = copy.deepcopy(entry(r1))
+    bundle = copy.deepcopy(first.bundle)
+    bundle["verificationMaterial"]["tlogEntries"].append(copy.deepcopy(log_entry(first.bundle)))
+    first.add_mutation(
+        corpus,
+        "p384-tlog-entry-duplicated",
+        bundle,
+        description="The same log entry twice",
+        category="profile-negative",
+        mutation="append a second copy of the log entry",
+        library=accept(),
+        profile=profile_reject("MK-5", "exactly one log entry is required"),
+        cosign=None,
+    )
+
+    bundle = copy.deepcopy(first.bundle)
+    extra = copy.deepcopy(log_entry(first.bundle))
     del extra["inclusionProof"]
-    b["verificationMaterial"]["tlogEntries"].append(extra)
-    c.add("p384-extra-entry-without-proof", b, description="A second, proofless copy of the log entry (the library requires a proof on at least one entry, not on each)",
-          category="profile-negative", source=derived, parent="p384-rekor2-dsse-tsa",
-          mutation="append a copy of the log entry without its inclusion proof",
-          key="r1", artifact="r1", root="production",
-          library=accept(),
-          profile=profile_reject("MK-5", "exactly one log entry is required"), cosign=None)
+    bundle["verificationMaterial"]["tlogEntries"].append(extra)
+    first.add_mutation(
+        corpus,
+        "p384-extra-entry-without-proof",
+        bundle,
+        description=(
+            "A second, proofless copy of the log entry (the library requires a "
+            "proof on at least one entry, not on each)"
+        ),
+        category="profile-negative",
+        mutation="append a copy of the log entry without its inclusion proof",
+        library=accept(),
+        profile=profile_reject("MK-5", "exactly one log entry is required"),
+        cosign=None,
+    )
 
-    b = copy.deepcopy(r1)
-    entry(b)["integratedTime"] = str(V1_INTEGRATED_TIME)
-    c.add("p384-rekor2-integrated-time-added", b, description="Rekor v2 entry carrying an (unauthenticated) integratedTime",
-          category="profile-negative", source=derived, parent="p384-rekor2-dsse-tsa",
-          mutation=f"add integratedTime {V1_INTEGRATED_TIME} to the log entry",
-          key="r1", artifact="r1", root="production", library=accept(),
-          profile=profile_reject("MK-6", "no integrated time is allowed"), cosign=None)
+    bundle = copy.deepcopy(first.bundle)
+    log_entry(bundle)["integratedTime"] = str(V1_INTEGRATED_TIME)
+    first.add_mutation(
+        corpus,
+        "p384-rekor2-integrated-time-added",
+        bundle,
+        description="Rekor v2 entry carrying an (unauthenticated) integratedTime",
+        category="profile-negative",
+        mutation=f'add integratedTime {V1_INTEGRATED_TIME} to the log entry',
+        library=accept(),
+        profile=profile_reject("MK-6", "no integrated time is allowed"),
+        cosign=None,
+    )
 
     # The field must be absent, whatever its value.
     for suffix, value, shown, library in (
-            ("zero-string", "0", '"0"', accept()),
+            ("zero-string", "0", "\"0\"", accept()),
             ("zero-number", 0, "0", accept()),
             ("null", None, "null", reject("Parse", "invalid type: null, expected a protobuf int64"))):
-        b = copy.deepcopy(r1)
-        entry(b)["integratedTime"] = value
-        c.add(f"p384-rekor2-integrated-time-{suffix}", b,
-              description=f"Rekor v2 entry carrying integratedTime {shown}: present, though zero or null",
-              category="profile-negative", source=derived, parent="p384-rekor2-dsse-tsa",
-              mutation=f"add integratedTime {shown} to the log entry",
-              key="r1", artifact="r1", root="production", library=library,
-              profile=profile_reject("MK-6", "no integrated time field is allowed"), cosign=None)
+        bundle = copy.deepcopy(first.bundle)
+        log_entry(bundle)["integratedTime"] = value
+        first.add_mutation(
+            corpus,
+            f'p384-rekor2-integrated-time-{suffix}',
+            bundle,
+            description=f'Rekor v2 entry carrying integratedTime {shown}: present, though zero or null',
+            category="profile-negative",
+            mutation=f'add integratedTime {shown} to the log entry',
+            library=library,
+            profile=profile_reject("MK-6", "no integrated time field is allowed"),
+            cosign=None,
+        )
 
-    b = copy.deepcopy(r1)
-    entry(b)["inclusionPromise"] = {"signedEntryTimestamp": b64(b"\x30\x00")}
-    c.add("p384-rekor2-inclusion-promise-added", b, description="Rekor v2 entry carrying an inclusion promise (SET)",
-          category="profile-negative", source=derived, parent="p384-rekor2-dsse-tsa",
-          mutation="add an inclusionPromise with an empty signature to the log entry",
-          key="r1", artifact="r1", root="production",
-          library=reject("TransparencyLog.InclusionPromise", "SET verification failed"),
-          profile=profile_reject("MK-6", "no inclusion promise is allowed"), cosign=None)
+    bundle = copy.deepcopy(first.bundle)
+    log_entry(bundle)["inclusionPromise"] = {"signedEntryTimestamp": b64(b"\x30\x00")}
+    first.add_mutation(
+        corpus,
+        "p384-rekor2-inclusion-promise-added",
+        bundle,
+        description="Rekor v2 entry carrying an inclusion promise (SET)",
+        category="profile-negative",
+        mutation="add an inclusionPromise with an empty signature to the log entry",
+        library=reject("TransparencyLog.InclusionPromise", "SET verification failed"),
+        profile=profile_reject("MK-6", "no inclusion promise is allowed"),
+        cosign=None,
+    )
 
-    b = copy.deepcopy(r1)
-    b["mediaType"] = "application/vnd.dev.sigstore.bundle+json;version=0.2"
-    c.add("p384-media-type-v0.2", b, description="Media type relabelled as bundle v0.2",
-          category="profile-negative", source=derived, parent="p384-rekor2-dsse-tsa",
-          mutation="set mediaType to the v0.2 media type",
-          key="r1", artifact="r1", root="production", library=accept(),
-          profile=profile_reject("MK-1", "only the v0.3 media type is accepted"), cosign=None)
+    bundle = copy.deepcopy(first.bundle)
+    bundle["mediaType"] = "application/vnd.dev.sigstore.bundle+json;version=0.2"
+    first.add_mutation(
+        corpus,
+        "p384-media-type-v0.2",
+        bundle,
+        description="Media type relabelled as bundle v0.2",
+        category="profile-negative",
+        mutation="set mediaType to the v0.2 media type",
+        library=accept(),
+        profile=profile_reject("MK-1", "only the v0.3 media type is accepted"),
+        cosign=None,
+    )
 
-    b = copy.deepcopy(r1)
-    del b["mediaType"]
-    c.add("p384-media-type-missing", b, description="No media type",
-          category="profile-negative", source=derived, parent="p384-rekor2-dsse-tsa",
-          mutation="remove mediaType", key="r1", artifact="r1", root="production",
-          library=reject("Bundle", "bundles must have an inclusion promise"),
-          profile=profile_reject("MK-1", "only the v0.3 media type is accepted"), cosign=None)
+    bundle = copy.deepcopy(first.bundle)
+    del bundle["mediaType"]
+    first.add_mutation(
+        corpus,
+        "p384-media-type-missing",
+        bundle,
+        description="No media type",
+        category="profile-negative",
+        mutation="remove mediaType",
+        library=reject("Bundle", "bundles must have an inclusion promise"),
+        profile=profile_reject("MK-1", "only the v0.3 media type is accepted"),
+        cosign=None,
+    )
 
-    text = json.dumps(r1, indent=2) + "\n"
-    signed_env = '  "dsseEnvelope": ' + json.dumps(r1["dsseEnvelope"], indent=2).replace("\n", "\n  ")
+    text = json.dumps(first.bundle, indent=2) + "\n"
+    signed_env = (
+        "  \"dsseEnvelope\": "
+        + json.dumps(first.bundle["dsseEnvelope"], indent=2).replace("\n", "\n  ")
+    )
     assert signed_env in text
-    dup = text.replace(signed_env, signed_env + ',\n  "dsseEnvelope": ' + json.dumps(r2["dsseEnvelope"]), 1)
+    dup = text.replace(
+        signed_env,
+        signed_env + ",\n  \"dsseEnvelope\": " + json.dumps(second.bundle["dsseEnvelope"]),
+        1,
+    )
     assert dup != text
-    c.add("p384-duplicate-dsse-envelope-key", None, raw=dup, description="Bundle JSON with the dsseEnvelope member twice: the signed envelope first, another key's envelope and statement second. This library keeps the first; a parser that keeps the last would read the other statement",
-          category="profile-negative", source=derived, parent="p384-rekor2-dsse-tsa",
-          mutation="insert a second dsseEnvelope member (the second key's envelope) after the original one",
-          key="r1", artifact="r1", root="production",
-          library=accept(),
-          profile=profile_reject("MK-4", "duplicate JSON keys are rejected"), cosign=None)
+    first.add_mutation(
+        corpus,
+        "p384-duplicate-dsse-envelope-key",
+        None,
+        raw=dup,
+        description=(
+            "Bundle JSON with the dsseEnvelope member twice: the signed envelope "
+            "first, another key's envelope and statement second. This library "
+            "keeps the first; a parser that keeps the last would read the other "
+            "statement"
+        ),
+        category="profile-negative",
+        mutation=(
+            "insert a second dsseEnvelope member (the second key's envelope) after "
+            "the original one"
+        ),
+        library=accept(),
+        profile=profile_reject("MK-4", "duplicate JSON keys are rejected"),
+        cosign=None,
+    )
 
-    b = copy.deepcopy(r1)
-    b["messageSignature"] = {"messageDigest": {"algorithm": "SHA2_256", "digest": b64(sha256(b""))},
-                             "signature": r1["dsseEnvelope"]["signatures"][0]["sig"]}
-    c.add("p384-conflicting-content", b, description="Both a DSSE envelope and a message signature",
-          category="profile-negative", source=derived, parent="p384-rekor2-dsse-tsa",
-          mutation="add a messageSignature member beside dsseEnvelope",
-          key="r1", artifact="r1", root="production",
-          library=accept(),
-          profile=profile_reject("MK-4", "conflicting content variants are rejected"), cosign=None)
+    bundle = copy.deepcopy(first.bundle)
+    bundle["messageSignature"] = {
+        "messageDigest": {"algorithm": "SHA2_256", "digest": b64(sha256(b''))},
+        "signature": first.bundle["dsseEnvelope"]["signatures"][0]["sig"],
+    }
+    first.add_mutation(
+        corpus,
+        "p384-conflicting-content",
+        bundle,
+        description="Both a DSSE envelope and a message signature",
+        category="profile-negative",
+        mutation="add a messageSignature member beside dsseEnvelope",
+        library=accept(),
+        profile=profile_reject("MK-4", "conflicting content variants are rejected"),
+        cosign=None,
+    )
 
-    # ---- Re-logged parents and entry-body negatives ----------------------
-    def relogged_vector(vid, parent_bundle, parent_id, key, artifact, description):
-        bb = copy.deepcopy(parent_bundle)
-        body = unb64(entry(bb)["canonicalizedBody"])
-        bb["verificationMaterial"]["tlogEntries"][0] = relog(entry(bb), body, log_a)
-        c.add(vid, bb, description=description, category="positive", source=relogged, parent=parent_id,
-              mutation="re-log the unchanged entry body at index 1 of a two-leaf tree in test log A",
-              key=key, artifact=artifact, root="test", library=accept(), cosign="accept")
-        return bb
 
-    p384_relogged = relogged_vector("p384-relogged", r1, "p384-rekor2-dsse-tsa", "r1", "r1",
-                                    "The real P-384 entry, unchanged, in synthetic test log A")
-    p256_relogged = relogged_vector("p256-relogged", r3, "p256-rekor2-dsse-tsa", "r3", "r3",
-                                    "The real P-256 entry, unchanged, in synthetic test log A")
+def add_relogged_vectors(corpus, *, first, second, third, log):
+    first_relogged = add_relogged_vector(
+        corpus,
+        log,
+        first,
+        "p384-relogged",
+        description="The real P-384 entry, unchanged, in synthetic test log A",
+    )
+    third_relogged = add_relogged_vector(
+        corpus,
+        log,
+        third,
+        "p256-relogged",
+        description="The real P-256 entry, unchanged, in synthetic test log A",
+    )
+    first_envelope = first.bundle["dsseEnvelope"]
+    first_pae = pae(first_envelope["payloadType"], unb64(first_envelope["payload"]))
+    third_envelope = third.bundle["dsseEnvelope"]
+    third_pae = pae(third_envelope["payloadType"], unb64(third_envelope["payload"]))
+    add_body_mutation(
+        corpus,
+        log,
+        first_relogged,
+        "p384-key-details-p256",
+        change=set_field(["signature", "verifier", "keyDetails"], "PKIX_ECDSA_P256_SHA_256"),
+        description="P-384 key logged with P-256 key details",
+        mutation="set keyDetails to PKIX_ECDSA_P256_SHA_256",
+        library=reject(
+            "TransparencyLog.EntryMismatch",
+            "key details PKIX_ECDSA_P256_SHA_256 do not match its EcdsaP384 key",
+        ),
+    )
+    add_body_mutation(
+        corpus,
+        log,
+        third_relogged,
+        "p256-key-labelled-p384",
+        change=combine_mutations(
+            set_field(["signature", "verifier", "keyDetails"], "PKIX_ECDSA_P384_SHA_384"),
+            set_field(["data", "algorithm"], "SHA2_384"),
+            set_field(["data", "digest"], b64(hashlib.sha384(third_pae).digest())),
+        ),
+        description=(
+            "Wrong curve: a P-256 key logged as P-384, with an otherwise "
+            "consistent SHA-384 digest of the PAE"
+        ),
+        mutation=(
+            "set keyDetails to PKIX_ECDSA_P384_SHA_384, algorithm to SHA2_384 and "
+            "digest to SHA-384(PAE)"
+        ),
+        library=reject(
+            "TransparencyLog.EntryMismatch",
+            "key details PKIX_ECDSA_P384_SHA_384 do not match its EcdsaP256 key",
+        ),
+    )
+    add_body_mutation(
+        corpus,
+        log,
+        first_relogged,
+        "p384-digest-algorithm-sha256",
+        change=combine_mutations(
+            set_field(["data", "algorithm"], "SHA2_256"),
+            set_field(["data", "digest"], b64(sha256(first_pae))),
+        ),
+        description="P-384 entry carrying SHA-256 of the PAE",
+        mutation="set algorithm to SHA2_256 and digest to SHA-256(PAE)",
+        library=reject(
+            "TransparencyLog.EntryMismatch",
+            (
+                "digest algorithm SHA2_256 does not match key details "
+                "PKIX_ECDSA_P384_SHA_384"
+            ),
+        ),
+    )
+    add_body_mutation(
+        corpus,
+        log,
+        first_relogged,
+        "p384-digest-truncated",
+        change=set_field(["data", "digest"], b64(hashlib.sha384(first_pae).digest()[:32])),
+        description="SHA2_384 digest truncated to 32 bytes",
+        mutation="truncate the logged digest to its first 32 bytes",
+        library=reject(
+            "TransparencyLog.MalformedEntry",
+            "SHA2_384 digest is 32 bytes, expected 48",
+        ),
+    )
+    flipped = flip_low_bit(hashlib.sha384(first_pae).digest(), 0)
+    add_body_mutation(
+        corpus,
+        log,
+        first_relogged,
+        "p384-digest-altered",
+        change=set_field(["data", "digest"], b64(bytes(flipped))),
+        description="Logged digest altered",
+        mutation="flip the low bit of the first byte of the logged digest",
+        library=reject("ArtifactMismatch", "artifact hash mismatch for hashedrekord entry"),
+    )
+    add_body_mutation(
+        corpus,
+        log,
+        first_relogged,
+        "p384-digest-of-payload",
+        change=set_field(
+            ["data", "digest"],
+            b64(hashlib.sha384(unb64(first_envelope["payload"])).digest()),
+        ),
+        description="SHA-384 of the payload alone instead of the PAE",
+        mutation="set the logged digest to SHA-384(payload)",
+        library=reject("ArtifactMismatch", "artifact hash mismatch for hashedrekord entry"),
+    )
+    second_verifier = entry_body(second.bundle)["spec"]["hashedRekordV002"]["signature"]["verifier"]
+    second_key = second_verifier["publicKey"]["rawBytes"]
+    add_body_mutation(
+        corpus,
+        log,
+        first_relogged,
+        "p384-logged-key-substituted",
+        change=set_field(["signature", "verifier", "publicKey", "rawBytes"], second_key),
+        description="Entry logs a different P-384 key than the one verifying the signature",
+        mutation="set the logged public key to the second key",
+        library=reject(
+            "TransparencyLog.EntryMismatch",
+            "public key in Rekor entry does not match managed key",
+        ),
+    )
+    add_body_mutation(
+        corpus,
+        log,
+        first_relogged,
+        "p384-logged-signature-substituted",
+        change=set_field(
+            ["signature", "content"],
+            second.bundle["dsseEnvelope"]["signatures"][0]["sig"],
+        ),
+        description="Entry logs a different signature than the bundle's",
+        mutation="set the logged signature to the second bundle's signature",
+        library=reject(
+            "TransparencyLog.EntryMismatch",
+            "DSSE signature in bundle does not match signature in Rekor entry",
+        ),
+    )
+    return first_relogged
 
-    def body_vector(vid, parent_bundle, parent_id, key, artifact, change, description, mutation, library):
-        bb = copy.deepcopy(parent_bundle)
-        body = body_of(bb)
-        change(body["spec"]["hashedRekordV002"])
-        bb["verificationMaterial"]["tlogEntries"][0] = relog(entry(bb), canonical(body), log_a)
-        c.add(vid, bb, description=description, category="standard-negative", source=derived,
-              parent=parent_id, mutation=mutation + "; re-log the changed body in test log A",
-              key=key, artifact=artifact, root="test", library=library,
-              profile=profile_reject("MK-8", "library verification fails"), cosign="reject")
 
-    env1 = r1["dsseEnvelope"]
-    pae1 = pae(env1["payloadType"], unb64(env1["payload"]))
-    env3 = r3["dsseEnvelope"]
-    pae3 = pae(env3["payloadType"], unb64(env3["payload"]))
+def add_binding_negatives(corpus, *, relogged_parent, log_a, log_b):
+    bundle = copy.deepcopy(relogged_parent.bundle)
+    body = unb64(log_entry(bundle)["canonicalizedBody"])
+    bundle["verificationMaterial"]["tlogEntries"][0] = relog(
+        log_entry(bundle), body, log_a, signers=[(log_b, log_a.host)]
+    )
+    relogged_parent.add_mutation(
+        corpus,
+        "p384-checkpoint-signed-by-other-trusted-log",
+        bundle,
+        description=(
+            "Entry names test log A; its checkpoint (origin A) is signed only by "
+            "test log B, which is also trusted"
+        ),
+        category="binding-negative",
+        mutation="replace the checkpoint signature with one by test log B's key (B's key hint)",
+        library=accept(),
+        binding=reject(
+            "TransparencyLog.Checkpoint",
+            "checkpoint has no valid signature from the entry's log",
+        ),
+        profile=profile_reject("MK-8", "checkpoint is not from the entry's log"),
+        cosign="reject",
+    )
+    bundle = copy.deepcopy(relogged_parent.bundle)
+    bundle["verificationMaterial"]["tlogEntries"][0] = relog(log_entry(bundle), body, log_a, origin=log_b.origin)
+    relogged_parent.add_mutation(
+        corpus,
+        "p384-checkpoint-origin-other-log",
+        bundle,
+        description="Checkpoint signed by test log A's key but with test log B's origin",
+        category="binding-negative",
+        mutation="write test log B's origin into the checkpoint body (signed by A)",
+        library=accept(),
+        binding=reject(
+            "TransparencyLog.Checkpoint",
+            (
+                "checkpoint origin \"test-log-b.rekor.example.com\" does not match the "
+                "entry's log \"test-log-a.rekor.example.com\""
+            ),
+        ),
+        profile=profile_reject("MK-8", "checkpoint is not from the entry's log"),
+        cosign="reject",
+    )
 
-    def set_(path, value):
-        def change(spec):
-            node = spec
-            for k in path[:-1]:
-                node = node[k]
-            node[path[-1]] = value
-        return change
 
-    def combine(*changes):
-        def change(spec):
-            for ch in changes:
-                ch(spec)
-        return change
-
-    body_vector("p384-key-details-p256", p384_relogged, "p384-relogged", "r1", "r1",
-                set_(["signature", "verifier", "keyDetails"], "PKIX_ECDSA_P256_SHA_256"),
-                "P-384 key logged with P-256 key details",
-                "set keyDetails to PKIX_ECDSA_P256_SHA_256",
-                reject("TransparencyLog.EntryMismatch", "key details PKIX_ECDSA_P256_SHA_256 do not match its EcdsaP384 key"))
-    body_vector("p256-key-labelled-p384", p256_relogged, "p256-relogged", "r3", "r3",
-                combine(set_(["signature", "verifier", "keyDetails"], "PKIX_ECDSA_P384_SHA_384"),
-                        set_(["data", "algorithm"], "SHA2_384"),
-                        set_(["data", "digest"], b64(hashlib.sha384(pae3).digest()))),
-                "Wrong curve: a P-256 key logged as P-384, with an otherwise consistent SHA-384 digest of the PAE",
-                "set keyDetails to PKIX_ECDSA_P384_SHA_384, algorithm to SHA2_384 and digest to SHA-384(PAE)",
-                reject("TransparencyLog.EntryMismatch", "key details PKIX_ECDSA_P384_SHA_384 do not match its EcdsaP256 key"))
-    body_vector("p384-digest-algorithm-sha256", p384_relogged, "p384-relogged", "r1", "r1",
-                combine(set_(["data", "algorithm"], "SHA2_256"),
-                        set_(["data", "digest"], b64(sha256(pae1)))),
-                "P-384 entry carrying SHA-256 of the PAE",
-                "set algorithm to SHA2_256 and digest to SHA-256(PAE)",
-                reject("TransparencyLog.EntryMismatch", "digest algorithm SHA2_256 does not match key details PKIX_ECDSA_P384_SHA_384"))
-    body_vector("p384-digest-truncated", p384_relogged, "p384-relogged", "r1", "r1",
-                set_(["data", "digest"], b64(hashlib.sha384(pae1).digest()[:32])),
-                "SHA2_384 digest truncated to 32 bytes",
-                "truncate the logged digest to its first 32 bytes",
-                reject("TransparencyLog.MalformedEntry", "SHA2_384 digest is 32 bytes, expected 48"))
-    flipped = bytearray(hashlib.sha384(pae1).digest())
-    flipped[0] ^= 1
-    body_vector("p384-digest-altered", p384_relogged, "p384-relogged", "r1", "r1",
-                set_(["data", "digest"], b64(bytes(flipped))),
-                "Logged digest altered",
-                "flip the low bit of the first byte of the logged digest",
-                reject("ArtifactMismatch", "artifact hash mismatch for hashedrekord entry"))
-    body_vector("p384-digest-of-payload", p384_relogged, "p384-relogged", "r1", "r1",
-                set_(["data", "digest"], b64(hashlib.sha384(unb64(env1["payload"])).digest())),
-                "SHA-384 of the payload alone instead of the PAE",
-                "set the logged digest to SHA-384(payload)",
-                reject("ArtifactMismatch", "artifact hash mismatch for hashedrekord entry"))
-    r2_key = body_of(r2)["spec"]["hashedRekordV002"]["signature"]["verifier"]["publicKey"]["rawBytes"]
-    body_vector("p384-logged-key-substituted", p384_relogged, "p384-relogged", "r1", "r1",
-                set_(["signature", "verifier", "publicKey", "rawBytes"], r2_key),
-                "Entry logs a different P-384 key than the one verifying the signature",
-                "set the logged public key to the second key",
-                reject("TransparencyLog.EntryMismatch", "public key in Rekor entry does not match managed key"))
-    body_vector("p384-logged-signature-substituted", p384_relogged, "p384-relogged", "r1", "r1",
-                set_(["signature", "content"], r2["dsseEnvelope"]["signatures"][0]["sig"]),
-                "Entry logs a different signature than the bundle's",
-                "set the logged signature to the second bundle's signature",
-                reject("TransparencyLog.EntryMismatch", "DSSE signature in bundle does not match signature in Rekor entry"))
-
-    # ---- Checkpoint-to-log binding on the test logs ---------------------
-    bb = copy.deepcopy(p384_relogged)
-    body = unb64(entry(bb)["canonicalizedBody"])
-    bb["verificationMaterial"]["tlogEntries"][0] = relog(entry(bb), body, log_a, signers=[(log_b, log_a.host)])
-    c.add("p384-checkpoint-signed-by-other-trusted-log", bb,
-          description="Entry names test log A; its checkpoint (origin A) is signed only by test log B, which is also trusted",
-          category="binding-negative", source=derived, parent="p384-relogged",
-          mutation="replace the checkpoint signature with one by test log B's key (B's key hint)",
-          key="r1", artifact="r1", root="test", library=accept(),
-          binding=reject(ERR_CHECKPOINT, "checkpoint has no valid signature from the entry's log"),
-          profile=profile_reject("MK-8", "checkpoint is not from the entry's log"), cosign="reject")
-    bb = copy.deepcopy(p384_relogged)
-    bb["verificationMaterial"]["tlogEntries"][0] = relog(entry(bb), body, log_a, origin=log_b.origin)
-    c.add("p384-checkpoint-origin-other-log", bb,
-          description="Checkpoint signed by test log A's key but with test log B's origin",
-          category="binding-negative", source=derived, parent="p384-relogged",
-          mutation="write test log B's origin into the checkpoint body (signed by A)",
-          key="r1", artifact="r1", root="test", library=accept(),
-          binding=reject(ERR_CHECKPOINT, "checkpoint origin \"test-log-b.rekor.example.com\" does not match the entry's log \"test-log-a.rekor.example.com\""),
-          profile=profile_reject("MK-8", "checkpoint is not from the entry's log"), cosign="reject")
-
-    # ---- Synthetic Rekor v1 entry for the P-384 regression --------------
-    bb = copy.deepcopy(r1)
-    key_pem = open(os.path.join(SOURCES, "r1", "key.pub"), "rb").read()
-    env = bb["dsseEnvelope"]
-    envelope_json = canonical({"payload": env["payload"], "payloadType": env["payloadType"],
-                               "signatures": [{"keyid": "", "sig": env["signatures"][0]["sig"]}]})
-    v1_body = canonical({
-        "apiVersion": "0.0.1", "kind": "dsse",
-        "spec": {
-            "envelopeHash": {"algorithm": "sha256", "value": sha256(envelope_json).hex()},
-            "payloadHash": {"algorithm": "sha256", "value": sha256(unb64(env["payload"])).hex()},
-            "signatures": [{"signature": env["signatures"][0]["sig"], "verifier": b64(key_pem)}],
+def add_rekor_v1_vector(corpus, *, first, log_v1):
+    bundle = copy.deepcopy(first.bundle)
+    with open(os.path.join(SOURCES, "r1", "key.pub"), "rb") as key_file:
+        key_pem = key_file.read()
+    envelope = bundle["dsseEnvelope"]
+    envelope_json = canonical(
+        {
+            "payload": envelope["payload"],
+            "payloadType": envelope["payloadType"],
+            "signatures": [{"keyid": "", "sig": envelope["signatures"][0]["sig"]}],
         },
-    })
-    v1_entry = relog({}, v1_body, log_v1, signers=[(log_v1, log_v1.host)])
-    set_payload = canonical({"body": b64(v1_body), "integratedTime": V1_INTEGRATED_TIME,
-                             "logID": log_v1.log_id.hex(), "logIndex": 1})
+    )
+    v1_body = canonical(
+        {
+            "apiVersion": "0.0.1",
+            "kind": "dsse",
+            "spec": {
+                "envelopeHash": {
+                    "algorithm": "sha256",
+                    "value": sha256(envelope_json).hex(),
+                },
+                "payloadHash": {
+                    "algorithm": "sha256",
+                    "value": sha256(unb64(envelope["payload"])).hex(),
+                },
+                "signatures": [
+                    {
+                        "signature": envelope["signatures"][0]["sig"],
+                        "verifier": b64(key_pem),
+                    },
+                ],
+            },
+        },
+    )
+    proof = inclusion_proof_for(v1_body, log_v1)
+    set_payload = canonical(
+        {
+            "body": b64(v1_body),
+            "integratedTime": V1_INTEGRATED_TIME,
+            "logID": log_v1.log_id.hex(),
+            "logIndex": 1,
+        },
+    )
     v1_entry = {
         "logIndex": "1",
-        "logId": v1_entry["logId"],
+        "logId": {"keyId": b64(log_v1.log_id)},
         "kindVersion": {"kind": "dsse", "version": "0.0.1"},
         "integratedTime": str(V1_INTEGRATED_TIME),
         "inclusionPromise": {"signedEntryTimestamp": b64(log_v1.sign(set_payload))},
-        "inclusionProof": v1_entry["inclusionProof"],
-        "canonicalizedBody": v1_entry["canonicalizedBody"],
+        "inclusionProof": proof,
+        "canonicalizedBody": b64(v1_body),
     }
-    bb["verificationMaterial"]["tlogEntries"] = [v1_entry]
-    c.add("p384-rekor1-dsse-synthetic", bb,
-          description="The real P-384 DSSE signature and timestamp with a synthetic Rekor v1 dsse 0.0.1 entry (inclusion proof, checkpoint and SET from test log v1)",
-          category="profile-negative", source={"kind": "synthetic", "detail": "Rekor v1 entry built by generate.py; no public Rekor v1 run was made"},
-          parent="p384-rekor2-dsse-tsa",
-          mutation="replace the Rekor v2 entry with a synthetic Rekor v1 dsse 0.0.1 entry for the same envelope",
-          key="r1", artifact="r1", root="test", library=accept(),
-          profile=profile_reject("MK-5", "Rekor v1 entries are rejected"), cosign="accept")
+    bundle["verificationMaterial"]["tlogEntries"] = [v1_entry]
+    corpus.add(
+        "p384-rekor1-dsse-synthetic",
+        bundle,
+        description=(
+            "The real P-384 DSSE signature and timestamp with a synthetic Rekor "
+            "v1 dsse 0.0.1 entry (inclusion proof, checkpoint and SET from test "
+            "log v1)"
+        ),
+        category="profile-negative",
+        source={
+            "kind": "synthetic",
+            "detail": (
+                "Rekor v1 entry built by generate.py; no public Rekor v1 run"
+                " was made"
+            ),
+        },
+        parent="p384-rekor2-dsse-tsa",
+        mutation=(
+            "replace the Rekor v2 entry with a synthetic Rekor v1 dsse 0.0.1 entry "
+            "for the same envelope"
+        ),
+        key="r1",
+        artifact="r1",
+        root="test",
+        library=accept(),
+        profile=profile_reject("MK-5", "Rekor v1 entries are rejected"),
+        cosign="accept",
+    )
 
-    # ---- Same binding behaviour on the real P-256 bundle ----------------
-    b = copy.deepcopy(r3)
-    entry(b)["logId"] = {"keyId": v1_production[0]["logId"]["keyId"]}
-    c.add("p256-entry-names-another-trusted-log", b, description="P-256 counterpart of p384-entry-names-another-trusted-log (also verifiable by releases without P-384 support)",
-          category="binding-negative", source=derived, parent="p256-rekor2-dsse-tsa",
-          mutation="set logId.keyId to the trusted root's rekor.sigstore.dev log ID",
-          key="r3", artifact="r3", root="production", library=accept(),
-          binding=reject(ERR_CHECKPOINT, "does not match the entry's log \"rekor.sigstore.dev\""),
-          profile=profile_reject("MK-8", "checkpoint is not from the entry's log"), cosign="reject")
 
+def add_p256_binding_vector(corpus, *, third, production):
+    bundle = copy.deepcopy(third.bundle)
+    log_entry(bundle)["logId"] = {"keyId": production_v1_log_id(production)}
+    third.add_mutation(
+        corpus,
+        "p256-entry-names-another-trusted-log",
+        bundle,
+        description=(
+            "P-256 counterpart of p384-entry-names-another-trusted-log (also "
+            "verifiable by releases without P-384 support)"
+        ),
+        category="binding-negative",
+        mutation="set logId.keyId to the trusted root's rekor.sigstore.dev log ID",
+        library=accept(),
+        binding=reject(
+            "TransparencyLog.Checkpoint",
+            "does not match the entry's log \"rekor.sigstore.dev\"",
+        ),
+        profile=profile_reject("MK-8", "checkpoint is not from the entry's log"),
+        cosign="reject",
+    )
+
+
+def write_manifest(out, corpus, runs, *, logs):
     manifest = {
-        "description": "Managed-key DSSE / Rekor v2 / RFC 3161 test vectors. See README.md and PROFILE.md.",
+        "description": (
+            "Managed-key DSSE / Rekor v2 / RFC 3161 test vectors. See "
+            "README.md and PROFILE.md."
+        ),
         "generator": "generate.py",
         "sources": {run: runs[run]["provenance"] for run in runs},
-        "test_logs": {log.host: {"origin": log.origin, "log_id": b64(log.log_id),
-                                 "rekor_api": 1 if log.v1 else 2} for log in (log_a, log_b, log_v1)},
-        "vectors": c.vectors,
+        "test_logs": {
+            log.host: {
+                "origin": log.origin,
+                "log_id": b64(log.log_id),
+                "rekor_api": log.version.value,
+            }
+            for log in logs
+        },
+        "vectors": corpus.vectors,
     }
-    with open(os.path.join(out, "manifest.json"), "w", encoding="utf-8") as f:
-        f.write(json.dumps(manifest, indent=2) + "\n")
-    print(f"wrote {len(c.vectors)} vectors")
+    with open(os.path.join(out, "manifest.json"), "w", encoding="utf-8") as file:
+        file.write(json.dumps(manifest, indent=2) + "\n")
+    print(f"wrote {len(corpus.vectors)} vectors")
 
 
 def check():
@@ -814,19 +1382,24 @@ def check():
         generate(tmp)
         diffs = []
         for name in OUTPUTS:
-            a, b = os.path.join(HERE, name), os.path.join(tmp, name)
-            if os.path.isdir(b):
-                cmp = filecmp.dircmp(a, b)
-                stack = [cmp]
+            committed, generated = os.path.join(HERE, name), os.path.join(tmp, name)
+            if os.path.isdir(generated):
+                comparison = filecmp.dircmp(committed, generated)
+                stack = [comparison]
                 while stack:
-                    d = stack.pop()
-                    diffs += [os.path.join(d.left, x) for x in d.left_only + d.right_only + d.diff_files + d.funny_files]
-                    for sub in d.subdirs.values():
+                    comparison = stack.pop()
+                    changed = comparison.left_only + comparison.diff_files + comparison.funny_files
+                    diffs += [os.path.join(comparison.left, name) for name in changed]
+                    diffs += [os.path.join(comparison.right, name) for name in comparison.right_only]
+                    for sub in comparison.subdirs.values():
                         stack.append(sub)
-            elif not os.path.exists(a) or not filecmp.cmp(a, b, shallow=False):
-                diffs.append(a)
+            elif not os.path.exists(committed) or not filecmp.cmp(committed, generated, shallow=False):
+                diffs.append(committed)
         if diffs:
-            print("generated files differ from the committed ones:\n  " + "\n  ".join(diffs), file=sys.stderr)
+            print(
+                "generated files differ from the committed ones:\n  " + "\n  ".join(diffs),
+                file=sys.stderr,
+            )
             sys.exit(1)
         print("committed vectors match a fresh generation")
     finally:

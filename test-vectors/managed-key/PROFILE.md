@@ -1,14 +1,11 @@
-# Strict managed-key profile (MK)
+# Managed-key profile (MK)
 
-Some vectors in this corpus target requirements of a stricter verifier profile
-for managed-key DSSE bundles, beyond what this library checks. Most of them are
-accepted by this library; a few are also rejected by it for another reason, as
-recorded in the manifest. The profile is described here so each such
-"profile-only" vector can cite the clause it violates, and so review can check
-the expected outcome against the text. It is a test contract,
-not library behaviour. `crates/sigstore-verify/tests/managed_key_corpus.rs`
-contains a test-only reference implementation that checks the clauses in the
-order listed and reports the first one violated.
+Some vectors target a managed-key verifier profile beyond what this library
+checks. Their library outcomes are recorded separately in the manifest. This
+profile is a test contract, not library behaviour.
+`crates/sigstore-verify/tests/managed_key_corpus.rs` contains a test-only
+reference implementation that reports the first violated clause. Clause IDs
+are stable; the table is ordered by the checks.
 
 The profile verifies a bundle against one approved public key that the verifier
 already holds. Policy about the signed statement itself (predicate type, subject,

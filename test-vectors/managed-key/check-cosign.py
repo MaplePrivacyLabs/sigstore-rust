@@ -24,32 +24,50 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 def predicate_type(bundle_path):
     try:
-        with open(bundle_path, encoding="utf-8") as f:
-            payload = base64.b64decode(json.load(f)["dsseEnvelope"]["payload"])
+        with open(bundle_path, encoding="utf-8") as file:
+            payload = base64.b64decode(json.load(file)["dsseEnvelope"]["payload"])
         return json.loads(payload)["predicateType"]
     except (ValueError, KeyError):
+        # Keeps the check usable for malformed payloads, but cannot establish
+        # that Cosign reached the vector's intended rejection gate.
         return "unknown"
 
 
+def vector_path(vector, field):
+    return os.path.join(HERE, vector[field])
+
+
 def main(cosign):
-    with open(os.path.join(HERE, "manifest.json"), encoding="utf-8") as f:
-        manifest = json.load(f)
+    with open(os.path.join(HERE, "manifest.json"), encoding="utf-8") as file:
+        manifest = json.load(file)
     mismatches = 0
-    for v in manifest["vectors"]:
-        want = v["cosign"]
-        if want is None:
+    for vector in manifest["vectors"]:
+        expected = vector["cosign"]
+        if expected is None:
             continue
-        path = lambda field: os.path.join(HERE, v[field])  # noqa: E731
-        r = subprocess.run(
-            [cosign, "verify-blob-attestation", "--bundle", path("bundle"), "--key", path("key"),
-             "--trusted-root", path("trusted_root"), "--use-signed-timestamps",
-             "--type", predicate_type(path("bundle")), path("artifact")],
-            capture_output=True, text=True)
-        got = "accept" if r.returncode == 0 else "reject"
-        detail = (r.stderr.strip().splitlines() or [""])[-1][:160]
-        status = "ok" if got == want else "MISMATCH"
-        mismatches += got != want
-        print(f"{status:8} {v['id']}: recorded {want}, cosign {got}  {detail}")
+        result = subprocess.run(
+            [
+                cosign,
+                "verify-blob-attestation",
+                "--bundle",
+                vector_path(vector, "bundle"),
+                "--key",
+                vector_path(vector, "key"),
+                "--trusted-root",
+                vector_path(vector, "trusted_root"),
+                "--use-signed-timestamps",
+                "--type",
+                predicate_type(vector_path(vector, "bundle")),
+                vector_path(vector, "artifact"),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        actual = "accept" if result.returncode == 0 else "reject"
+        detail = (result.stderr.strip().splitlines() or [""])[-1][:160]
+        status = "ok" if actual == expected else "MISMATCH"
+        mismatches += actual != expected
+        print(f"{status:8} {vector["id"]}: recorded {expected}, cosign {actual}  {detail}")
     print(f"{mismatches} mismatches")
     return 1 if mismatches else 0
 
