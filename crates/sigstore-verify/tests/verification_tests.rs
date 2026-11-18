@@ -66,6 +66,8 @@ const SIGSTORE_JS_PROVENANCE: &str =
 const OTHERNAME_BUNDLE: &str = include_str!("../test_data/bundles/othername.sigstore.json");
 
 // Conda package attestation bundle (from prefix-dev/sigstore-example)
+const CONDA_ATTESTATION_REKOR2_BUNDLE: &str =
+    include_str!("../test_data/bundles/conda-attestation-rekor2.sigstore.json");
 const CONDA_ATTESTATION_BUNDLE: &str =
     include_str!("../test_data/bundles/conda-attestation.sigstore.json");
 const CONDA_PACKAGE: &[u8] =
@@ -1967,7 +1969,7 @@ fn test_certificate_checked_against_every_verified_timestamp() {
 }
 
 #[test]
-fn checkpoint_log_binding_is_off_by_default() {
+fn test_checkpoint_log_binding_defaults_off_and_can_be_required() {
     assert!(!VerificationPolicy::any_identity().requires_checkpoint_log_binding());
     assert!(VerificationPolicy::any_identity()
         .require_checkpoint_log_binding()
@@ -1980,16 +1982,13 @@ fn checkpoint_log_binding_is_off_by_default() {
 }
 
 #[test]
-fn checkpoint_log_binding_accepts_checkpoints_from_the_entry_log() {
+fn test_checkpoint_log_binding_accepts_checkpoints_from_the_entry_log() {
     // Rekor v2: the checkpoint is signed by the entry's log and carries its
     // origin.
-    let bundle = Bundle::from_json(include_str!(
-        "../test_data/bundles/conda-attestation-rekor2.sigstore.json"
-    ))
-    .unwrap();
-    let artifact = include_bytes!("../test_data/bundles/signed-package-2.1.0-hb0f4dca_0.conda");
+    let bundle = Bundle::from_json(CONDA_ATTESTATION_REKOR2_BUNDLE).unwrap();
+    let artifact = CONDA_PACKAGE;
     let policy = VerificationPolicy::any_identity().require_checkpoint_log_binding();
-    verify(artifact.as_slice(), &bundle, &policy, &staging_root()).unwrap();
+    verify(artifact, &bundle, &policy, &staging_root()).unwrap();
 
     // Rekor v1: the checkpoint is signed by the entry's log key.
     let bundle = Bundle::from_json(COSIGN_V3_BLOB_BUNDLE).unwrap();
@@ -2001,14 +2000,12 @@ fn checkpoint_log_binding_accepts_checkpoints_from_the_entry_log() {
 }
 
 #[test]
-fn checkpoint_log_binding_rejects_a_checkpoint_from_another_trusted_log() {
+fn test_checkpoint_log_binding_rejects_a_checkpoint_from_another_trusted_log() {
     // Point a real Rekor v2 entry at a different log in the same trusted
     // root. The log ID is not covered by the inclusion proof or checkpoint,
     // so without the binding the entry still verifies.
-    let mut bundle_json: serde_json::Value = serde_json::from_str(include_str!(
-        "../test_data/bundles/conda-attestation-rekor2.sigstore.json"
-    ))
-    .unwrap();
+    let mut bundle_json: serde_json::Value =
+        serde_json::from_str(CONDA_ATTESTATION_REKOR2_BUNDLE).unwrap();
     let entry = &mut bundle_json["verificationMaterial"]["tlogEntries"][0];
     assert_eq!(
         entry["logId"]["keyId"],
@@ -2017,13 +2014,13 @@ fn checkpoint_log_binding_rejects_a_checkpoint_from_another_trusted_log() {
     // log2025-alpha2.rekor.sigstage.dev
     entry["logId"]["keyId"] = "KfSiSX2iRLyhK62SUVL47vVcqqRx/RAewpKJm8IdZTo=".into();
     let bundle = Bundle::from_json(&bundle_json.to_string()).unwrap();
-    let artifact = include_bytes!("../test_data/bundles/signed-package-2.1.0-hb0f4dca_0.conda");
+    let artifact = CONDA_PACKAGE;
 
-    let lenient = VerificationPolicy::any_identity();
-    verify(artifact.as_slice(), &bundle, &lenient, &staging_root()).unwrap();
+    let default_policy = VerificationPolicy::any_identity();
+    verify(artifact, &bundle, &default_policy, &staging_root()).unwrap();
 
-    let strict = lenient.require_checkpoint_log_binding();
-    let err = verify(artifact.as_slice(), &bundle, &strict, &staging_root()).unwrap_err();
+    let binding_policy = default_policy.require_checkpoint_log_binding();
+    let err = verify(artifact, &bundle, &binding_policy, &staging_root()).unwrap_err();
     assert!(
         matches!(
             &err,

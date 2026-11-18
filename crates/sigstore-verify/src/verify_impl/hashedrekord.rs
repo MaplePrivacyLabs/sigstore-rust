@@ -384,14 +384,17 @@ fn validate_integrated_time(entry: &TransparencyLogEntry, bundle: &Bundle) -> Re
 mod tests {
     use super::*;
     use crate::artifact::ArtifactRequirements;
+    use crate::error::TransparencyLogError;
     use base64::engine::general_purpose::STANDARD;
     use base64::Engine;
+    use serde_json::{json, Value};
     use sigstore_crypto::SigningScheme;
     use sigstore_types::Artifact;
 
-    /// Throwaway public keys; only their algorithm identifiers matter here.
+    /// Test public keys used for curve detection and exact key binding.
     const P384_KEY: &str = "MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAEPjUQjqathWUZXpBdDJWDjVyyt2YdKshU+5yRnQu+LoY/+s+ASLZMFAscoSnyNhtJqIanYUWKH3bcnJvjUhYX8PsLZ4U28uOSh++vOqacWHVOK3CRJGmw47AudN9oHsO6";
     const P256_KEY: &str = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEd1cZefkJQlXtMUcBsptiJ8HfpRyHwukZWXVCjrRIMK8U1k3lOw8CXdzE/iLy5DEiqa4oA8td++rmxiPlJlZUAg==";
+    const OTHER_P384_KEY: &str = "MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAEg9Umw8SVCTf5swPswBu3b1qXDPc4+Uj4T/h/F6bm2I6xkA4O1bXzTy4nnmGXxevyrRlJeUIRrHd/aJLs4p084odVdyJAvgYMmzfiSpib1N2SmCTLKRXOyS45o6N4w40m";
     const SIGNATURE: &str = "c2lnbmF0dXJl";
 
     fn statement() -> Vec<u8> {
@@ -402,6 +405,7 @@ mod tests {
         .into_bytes()
     }
 
+    // Independent PAE encoding: do not use the production envelope.pae() oracle.
     fn pae() -> Vec<u8> {
         let payload = statement();
         let payload_type = "application/vnd.in-toto+json";
@@ -442,53 +446,90 @@ mod tests {
             }
         }
 
+        fn bundle(&self, content: Value) -> Bundle {
+            let body = json!({
+                "apiVersion": "0.0.2",
+                "kind": "hashedrekord",
+                "spec": {
+                    "hashedRekordV002": {
+                        "data": {"algorithm": self.algorithm, "digest": STANDARD.encode(&self.digest)},
+                        "signature": {
+                            "content": SIGNATURE,
+                            "verifier": {
+                                "keyDetails": self.key_details,
+                                "publicKey": {"rawBytes": self.key},
+                            },
+                        },
+                    },
+                },
+            });
+            let mut bundle = json!({
+                "mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+                "verificationMaterial": {
+                    "publicKey": {"hint": "hint"},
+                    "tlogEntries": [{
+                        "logIndex": "1",
+                        "logId": {"keyId": STANDARD.encode([0u8; 32])},
+                        "kindVersion": {"kind": "hashedrekord", "version": "0.0.2"},
+                        "canonicalizedBody": STANDARD.encode(body.to_string()),
+                    }],
+                },
+            });
+            bundle
+                .as_object_mut()
+                .unwrap()
+                .extend(content.as_object().unwrap().clone());
+            Bundle::from_json(&bundle.to_string()).unwrap()
+        }
+
         /// Verify a DSSE bundle carrying this entry with `managed_key`.
         fn verify(&self, managed_key: &str) -> Result<()> {
-            let body = format!(
-                r#"{{"apiVersion":"0.0.2","kind":"hashedrekord","spec":{{"hashedRekordV002":{{"data":{{"algorithm":"{}","digest":"{}"}},"signature":{{"content":"{SIGNATURE}","verifier":{{"keyDetails":"{}","publicKey":{{"rawBytes":"{}"}}}}}}}}}}}}"#,
-                self.algorithm,
-                STANDARD.encode(&self.digest),
-                self.key_details,
-                self.key,
-            );
-            let bundle = format!(
-                r#"{{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json","verificationMaterial":{{"publicKey":{{"hint":"hint"}},"tlogEntries":[{{"logIndex":"1","logId":{{"keyId":"{}"}},"kindVersion":{{"kind":"hashedrekord","version":"0.0.2"}},"canonicalizedBody":"{}"}}]}},"dsseEnvelope":{{"payload":"{}","payloadType":"application/vnd.in-toto+json","signatures":[{{"sig":"{SIGNATURE}","keyid":""}}]}}}}"#,
-                STANDARD.encode([0u8; 32]),
-                STANDARD.encode(body),
-                STANDARD.encode(statement()),
-            );
-            let bundle = Bundle::from_json(&bundle).unwrap();
-            let managed_key = DerPublicKey::new(STANDARD.decode(managed_key).unwrap());
-            let requirements =
-                ArtifactRequirements::new(&bundle.content, SigningScheme::EcdsaP384Sha384).unwrap();
-            let artifact =
-                PreparedArtifact::from_artifact(Artifact::Blob(b"artifact"), &requirements)
-                    .unwrap();
-            let entry = &bundle.verification_material.tlog_entries[0];
-            verify_hashedrekord_entry(entry, &bundle, &artifact, Some(&managed_key))
+            let bundle = self.bundle(json!({
+                "dsseEnvelope": {
+                    "payload": STANDARD.encode(statement()),
+                    "payloadType": "application/vnd.in-toto+json",
+                    "signatures": [{"sig": SIGNATURE, "keyid": ""}],
+                },
+            }));
+            verify_entry_bundle(&bundle, Artifact::Blob(b"artifact"), managed_key)
         }
+    }
+
+    fn verify_entry_bundle(
+        bundle: &Bundle,
+        artifact: Artifact<'_>,
+        managed_key: &str,
+    ) -> Result<()> {
+        let managed_key = DerPublicKey::new(STANDARD.decode(managed_key).unwrap());
+        // These tests inspect Rekor binding directly; the signing scheme only
+        // prepares artifact digests and does not verify the placeholder signature.
+        let requirements =
+            ArtifactRequirements::new(&bundle.content, SigningScheme::EcdsaP384Sha384).unwrap();
+        let artifact = PreparedArtifact::from_artifact(artifact, &requirements).unwrap();
+        let entry = &bundle.verification_material.tlog_entries[0];
+        verify_hashedrekord_entry(entry, bundle, &artifact, Some(&managed_key))
     }
 
     fn assert_entry_mismatch(result: Result<()>, expected: &str) {
         match result {
-            Err(Error::TransparencyLog(crate::error::TransparencyLogError::EntryMismatch(m)))
+            Err(Error::TransparencyLog(TransparencyLogError::EntryMismatch(m)))
                 if m.contains(expected) => {}
             other => panic!("expected entry mismatch containing {expected:?}, got {other:?}"),
         }
     }
 
     #[test]
-    fn p384_dsse_entry_binds_sha384_of_pae() {
+    fn test_p384_dsse_entry_binds_sha384_of_pae() {
         Entry::conforming_p384().verify(P384_KEY).unwrap();
     }
 
     #[test]
-    fn p256_dsse_entry_binds_sha256_of_pae() {
+    fn test_p256_dsse_entry_binds_sha256_of_pae() {
         Entry::conforming_p256().verify(P256_KEY).unwrap();
     }
 
     #[test]
-    fn p384_entry_with_sha256_of_pae_is_rejected() {
+    fn test_p384_entry_with_sha256_of_pae_is_rejected() {
         // A P-256-shaped digest under P-384 key details: the algorithm label
         // disagrees with the key details.
         let entry = Entry {
@@ -503,7 +544,7 @@ mod tests {
     }
 
     #[test]
-    fn key_details_must_match_the_logged_key() {
+    fn test_key_details_must_match_the_logged_key() {
         // P-384 key labelled as P-256.
         let entry = Entry {
             key_details: "PKIX_ECDSA_P256_SHA_256",
@@ -529,18 +570,18 @@ mod tests {
     }
 
     #[test]
-    fn digest_length_must_match_the_algorithm() {
+    fn test_digest_length_must_match_the_algorithm() {
         let mut entry = Entry::conforming_p384();
         entry.digest.truncate(32);
         match entry.verify(P384_KEY) {
-            Err(Error::TransparencyLog(crate::error::TransparencyLogError::MalformedEntry(m)))
+            Err(Error::TransparencyLog(TransparencyLogError::MalformedEntry(m)))
                 if m.contains("SHA2_384 digest is 32 bytes, expected 48") => {}
             other => panic!("unexpected result {other:?}"),
         }
     }
 
     #[test]
-    fn digest_value_must_match_the_pae() {
+    fn test_digest_value_must_match_the_pae() {
         let mut entry = Entry::conforming_p384();
         entry.digest[0] ^= 1;
         assert!(matches!(
@@ -560,34 +601,24 @@ mod tests {
     }
 
     #[test]
-    fn logged_key_must_match_the_managed_key() {
+    fn test_logged_key_must_match_the_managed_key() {
         let entry = Entry::conforming_p384();
-        let other_p384 = "MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAEg9Umw8SVCTf5swPswBu3b1qXDPc4+Uj4T/h/F6bm2I6xkA4O1bXzTy4nnmGXxevyrRlJeUIRrHd/aJLs4p084odVdyJAvgYMmzfiSpib1N2SmCTLKRXOyS45o6N4w40m";
+
         assert_entry_mismatch(
-            entry.verify(other_p384),
+            entry.verify(OTHER_P384_KEY),
             "public key in Rekor entry does not match managed key",
         );
     }
 
     #[test]
-    fn p384_message_signature_entry_binds_sha384_of_artifact() {
+    fn test_p384_message_signature_entry_binds_sha384_of_artifact() {
         let verify = |logged: &[u8], supplied: Artifact<'_>| {
-            let body = format!(
-                r#"{{"apiVersion":"0.0.2","kind":"hashedrekord","spec":{{"hashedRekordV002":{{"data":{{"algorithm":"SHA2_384","digest":"{}"}},"signature":{{"content":"{SIGNATURE}","verifier":{{"keyDetails":"PKIX_ECDSA_P384_SHA_384","publicKey":{{"rawBytes":"{P384_KEY}"}}}}}}}}}}}}"#,
-                STANDARD.encode(logged),
-            );
-            let bundle = format!(
-                r#"{{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json","verificationMaterial":{{"publicKey":{{"hint":"hint"}},"tlogEntries":[{{"logIndex":"1","logId":{{"keyId":"{}"}},"kindVersion":{{"kind":"hashedrekord","version":"0.0.2"}},"canonicalizedBody":"{}"}}]}},"messageSignature":{{"signature":"{SIGNATURE}"}}}}"#,
-                STANDARD.encode([0u8; 32]),
-                STANDARD.encode(body),
-            );
-            let bundle = Bundle::from_json(&bundle).unwrap();
-            let key = DerPublicKey::new(STANDARD.decode(P384_KEY).unwrap());
-            let requirements =
-                ArtifactRequirements::new(&bundle.content, SigningScheme::EcdsaP384Sha384).unwrap();
-            let artifact = PreparedArtifact::from_artifact(supplied, &requirements).unwrap();
-            let entry = &bundle.verification_material.tlog_entries[0];
-            verify_hashedrekord_entry(entry, &bundle, &artifact, Some(&key))
+            let entry = Entry {
+                digest: logged.to_vec(),
+                ..Entry::conforming_p384()
+            };
+            let bundle = entry.bundle(json!({"messageSignature": {"signature": SIGNATURE}}));
+            verify_entry_bundle(&bundle, supplied, P384_KEY)
         };
         let digest = sigstore_crypto::sha384(b"artifact");
         verify(digest.as_bytes(), Artifact::Blob(b"artifact")).unwrap();
@@ -614,7 +645,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_key_details_fail_to_parse() {
+    fn test_unknown_key_details_fail_to_parse() {
         let entry = Entry {
             key_details: "PKIX_ECDSA_P384_SHA_256",
             ..Entry::conforming_p384()
@@ -622,7 +653,7 @@ mod tests {
         assert!(matches!(
             entry.verify(P384_KEY),
             Err(Error::TransparencyLog(
-                crate::error::TransparencyLogError::MalformedEntry(_)
+                TransparencyLogError::MalformedEntry(_)
             ))
         ));
     }
