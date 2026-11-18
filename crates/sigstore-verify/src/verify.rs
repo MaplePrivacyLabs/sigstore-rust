@@ -82,25 +82,8 @@ impl PublicKeyVerificationPolicy {
 
     /// Require each checkpoint to be signed by the entry's own log.
     ///
-    /// By default a checkpoint is accepted when any Rekor key in the trusted
-    /// root signed it, so an entry naming one log can be shown included under
-    /// a checkpoint from another trusted log. With this option, the
-    /// checkpoint must carry a valid signature from the key whose log ID is
-    /// the entry's log ID, and for Rekor v2 its origin must equal the host of
-    /// that log's base URL in the trusted root. Other signature lines, such as
-    /// witness cosignatures, are still ignored.
-    ///
-    /// Limitation: for Rekor v1 entries only the signing key is bound, not the
-    /// checkpoint origin. A Rekor v1 origin includes a tree ID that the
-    /// trusted root does not record, so there is no expected origin to compare
-    /// against.
-    ///
-    /// For Rekor v2 entries, a trusted log whose base URL is not an absolute
-    /// `http(s)` URL with a host (and no user info) has no expected origin,
-    /// and its entries fail verification when this option is set.
-    ///
-    /// This only affects inclusion proof verification, so it has no effect
-    /// when transparency log verification is skipped.
+    /// See [`VerificationPolicy::require_checkpoint_log_binding`] for origin
+    /// requirements and the Rekor v1 limitation.
     pub fn require_checkpoint_log_binding(mut self) -> Self {
         self.checkpoint_log_binding = true;
         self
@@ -391,7 +374,7 @@ impl VerificationPolicy {
     /// that log's base URL in the trusted root. Other signature lines, such as
     /// witness cosignatures, are still ignored.
     ///
-    /// Limitation: for Rekor v1 entries only the signing key is bound, not the
+    /// For Rekor v1 entries only the signing key is bound, not the
     /// checkpoint origin. A Rekor v1 origin includes a tree ID that the
     /// trusted root does not record, so there is no expected origin to compare
     /// against.

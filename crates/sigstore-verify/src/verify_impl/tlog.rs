@@ -190,22 +190,7 @@ pub fn verify_checkpoint(
     is_v2: bool,
     rekor_keys: &Keyring,
 ) -> Result<()> {
-    // Parse the checkpoint (signed note)
-    let checkpoint = Checkpoint::from_text(checkpoint_envelope)
-        .map_err(|e| Error::checkpoint(format!("Failed to parse checkpoint: {}", e)))?;
-
-    // Rekor v1 requires internal consistency with its duplicate proof root.
-    // Rekor v2 explicitly treats that field as unauthenticated and ignores it.
-    let checkpoint_root_hash = checkpoint.root_hash();
-    let proof_root_hash = &inclusion_proof.root_hash;
-
-    if !is_v2 && checkpoint_root_hash.as_bytes() != proof_root_hash.as_bytes() {
-        return Err(Error::checkpoint(format!(
-            "Checkpoint root hash mismatch: expected {}, got {}",
-            checkpoint_root_hash.to_hex(),
-            proof_root_hash.to_hex()
-        )));
-    }
+    let checkpoint = parse_checkpoint(checkpoint_envelope, inclusion_proof, is_v2)?;
 
     // A checkpoint can contain log and witness signatures. TrustedRoot keeps
     // validity metadata alongside each parsed verification key. Four-byte
@@ -232,6 +217,32 @@ pub fn verify_checkpoint(
     Err(Error::checkpoint(message.to_string()))
 }
 
+/// Parse the signed note and check Rekor v1's duplicated root hash.
+fn parse_checkpoint(
+    checkpoint_envelope: &str,
+    inclusion_proof: &InclusionProof,
+    is_v2: bool,
+) -> Result<Checkpoint> {
+    // Parse the checkpoint (signed note)
+    let checkpoint = Checkpoint::from_text(checkpoint_envelope)
+        .map_err(|e| Error::checkpoint(format!("Failed to parse checkpoint: {}", e)))?;
+
+    // Rekor v1 requires internal consistency with its duplicate proof root.
+    // Rekor v2 explicitly treats that field as unauthenticated and ignores it.
+    let checkpoint_root_hash = checkpoint.root_hash();
+    let proof_root_hash = &inclusion_proof.root_hash;
+
+    if !is_v2 && checkpoint_root_hash.as_bytes() != proof_root_hash.as_bytes() {
+        return Err(Error::checkpoint(format!(
+            "Checkpoint root hash mismatch: expected {}, got {}",
+            checkpoint_root_hash.to_hex(),
+            proof_root_hash.to_hex()
+        )));
+    }
+
+    Ok(checkpoint)
+}
+
 /// The trusted Rekor logs, by log ID, with the checkpoint origin each one
 /// signs under.
 ///
@@ -252,8 +263,7 @@ impl RekorLogs {
         Ok(Self { origins })
     }
 
-    /// The origin a Rekor v2 log signs its checkpoints under: the host of its
-    /// base URL, as in `log2025-1.rekor.sigstore.dev`.
+    /// The expected checkpoint origin for this log ID.
     fn origin(&self, log_id: &Sha256Hash) -> Option<&str> {
         self.origins
             .get(log_id)
@@ -302,16 +312,11 @@ fn verify_checkpoint_from_entry_log(
     logs: &RekorLogs,
 ) -> Result<()> {
     let is_v2 = is_rekor_v2(entry);
-    let checkpoint = Checkpoint::from_text(inclusion_proof.checkpoint.envelope())
-        .map_err(|e| Error::checkpoint(format!("Failed to parse checkpoint: {}", e)))?;
-
-    if !is_v2 && checkpoint.root_hash().as_bytes() != inclusion_proof.root_hash.as_bytes() {
-        return Err(Error::checkpoint(format!(
-            "Checkpoint root hash mismatch: expected {}, got {}",
-            checkpoint.root_hash().to_hex(),
-            inclusion_proof.root_hash.to_hex()
-        )));
-    }
+    let checkpoint = parse_checkpoint(
+        inclusion_proof.checkpoint.envelope(),
+        inclusion_proof,
+        is_v2,
+    )?;
 
     let log_id = Sha256Hash::try_from(entry.log_id.key_id.as_bytes())
         .map_err(|e| Error::malformed_entry(format!("invalid Rekor log ID: {e}")))?;
@@ -338,7 +343,8 @@ fn verify_checkpoint_from_entry_log(
         None
     };
 
-    let hint = &log_id.as_bytes()[..4];
+    const KEY_HINT_LEN: usize = 4;
+    let hint = &log_id.as_bytes()[..KEY_HINT_LEN];
     let message = checkpoint.signed_data();
     let signed_by_log = checkpoint.signatures().iter().any(|sig| {
         sig.key_id.as_bytes() == hint
