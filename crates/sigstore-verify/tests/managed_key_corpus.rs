@@ -12,6 +12,7 @@
 //! negatives (most of which this library accepts) are also checked to fail for
 //! the clause they cite. It is not part of the library.
 
+use serde::Deserialize;
 use serde_json::Value;
 use sigstore_trust_root::TrustedRoot;
 use sigstore_types::{Artifact, Bundle, DerPublicKey};
@@ -20,55 +21,119 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[derive(Deserialize)]
+struct Manifest {
+    vectors: Vec<VectorSpec>,
+}
+
+#[derive(Deserialize)]
+struct VectorSpec {
+    id: String,
+    bundle: PathBuf,
+    key: PathBuf,
+    artifact: PathBuf,
+    trusted_root: PathBuf,
+    parent: Option<String>,
+    category: String,
+    expected: Expectations,
+}
+
+#[derive(Deserialize)]
+struct Expectations {
+    library: ExpectedLibrary,
+    library_checkpoint_log_binding: ExpectedLibrary,
+    profile: ExpectedProfile,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "result", rename_all = "lowercase")]
+enum ExpectedLibrary {
+    Accept,
+    Reject { error: String, message: String },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "result", rename_all = "lowercase")]
+enum ExpectedProfile {
+    Accept,
+    Reject { clause: String },
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Mode {
+    Default,
+    CheckpointLogBinding,
+}
+
+impl Mode {
+    const ALL: [Self; 2] = [Self::Default, Self::CheckpointLogBinding];
+
+    fn expected(self, spec: &VectorSpec) -> &ExpectedLibrary {
+        match self {
+            Self::Default => &spec.expected.library,
+            Self::CheckpointLogBinding => &spec.expected.library_checkpoint_log_binding,
+        }
+    }
+
+    fn policy(self, key: DerPublicKey) -> PublicKeyVerificationPolicy {
+        let policy = PublicKeyVerificationPolicy::new(key);
+        match self {
+            Self::Default => policy,
+            Self::CheckpointLogBinding => policy.require_checkpoint_log_binding(),
+        }
+    }
+}
+
 fn corpus_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-vectors/managed-key")
 }
 
+fn manifest() -> Manifest {
+    serde_json::from_str(&fs::read_to_string(corpus_dir().join("manifest.json")).unwrap()).unwrap()
+}
+
 struct Vector {
     id: String,
-    raw: String,
+    bundle_json: String,
     key: DerPublicKey,
     artifact: Vec<u8>,
     root: TrustedRoot,
 }
 
-fn load(spec: &Value) -> Vector {
+fn load(spec: &VectorSpec) -> Vector {
     let dir = corpus_dir();
-    let path = |field: &str| dir.join(spec[field].as_str().unwrap());
     Vector {
-        id: spec["id"].as_str().unwrap().to_string(),
-        raw: fs::read_to_string(path("bundle")).unwrap(),
-        key: DerPublicKey::from_pem(&fs::read_to_string(path("key")).unwrap()).unwrap(),
-        artifact: fs::read(path("artifact")).unwrap(),
-        root: TrustedRoot::from_file(path("trusted_root")).unwrap(),
+        id: spec.id.clone(),
+        bundle_json: fs::read_to_string(dir.join(&spec.bundle)).unwrap(),
+        key: DerPublicKey::from_pem(&fs::read_to_string(dir.join(&spec.key)).unwrap()).unwrap(),
+        artifact: fs::read(dir.join(&spec.artifact)).unwrap(),
+        root: TrustedRoot::from_file(dir.join(&spec.trusted_root)).unwrap(),
     }
 }
 
 /// The library outcome: `Ok` or (error category, message).
 type Outcome = Result<(), (String, String)>;
 
-fn verify_library(v: &Vector, bind_checkpoint: bool) -> Outcome {
-    let bundle = Bundle::from_json(&v.raw).map_err(|e| ("Parse".to_string(), e.to_string()))?;
-    let mut policy = PublicKeyVerificationPolicy::new(v.key.clone());
-    if bind_checkpoint {
-        policy = policy.require_checkpoint_log_binding();
-    }
+fn verify_library(vector: &Vector, mode: Mode) -> Outcome {
+    let bundle = Bundle::from_json(&vector.bundle_json)
+        .map_err(|error| ("Parse".to_string(), error.to_string()))?;
     verify(
-        Artifact::from(v.artifact.as_slice()),
+        Artifact::from(vector.artifact.as_slice()),
         &bundle,
-        &policy,
-        &v.root,
+        &mode.policy(vector.key.clone()),
+        &vector.root,
     )
     .map(|_| ())
-    .map_err(|e| (category(&e), e.to_string()))
+    .map_err(|error| (category(&error), error.to_string()))
 }
 
-/// `Variant` or `Variant.Inner` for the nested error enums, from their Debug
-/// form, e.g. `TransparencyLog.Checkpoint`.
+/// `Variant` or `Variant.Inner` for nested errors, e.g. `TransparencyLog.Checkpoint`.
+/// These Debug names are the Rust error vocabulary recorded by the corpus;
+/// language-neutral reason codes are separate manifest fields.
 fn category(error: &sigstore_verify::Error) -> String {
     let debug = format!("{error:?}");
-    let name = |s: &str| {
-        s.split(|c: char| !c.is_alphanumeric())
+    let name = |text: &str| {
+        text.split(|character: char| !character.is_alphanumeric())
             .next()
             .unwrap()
             .to_string()
@@ -82,82 +147,83 @@ fn category(error: &sigstore_verify::Error) -> String {
     }
 }
 
-fn check(expected: &Value, actual: &Outcome) -> Result<(), String> {
-    match (expected["result"].as_str().unwrap(), actual) {
-        ("accept", Ok(())) => Ok(()),
-        ("reject", Err((category, message))) => {
-            let want_category = expected["error"].as_str().unwrap();
-            let want_message = expected["message"].as_str().unwrap();
-            if category == want_category && message.contains(want_message) {
+fn check(expected: &ExpectedLibrary, actual: &Outcome) -> Result<(), String> {
+    match (expected, actual) {
+        (ExpectedLibrary::Accept, Ok(())) => Ok(()),
+        (ExpectedLibrary::Reject { error, message }, Err((actual_category, actual_message))) => {
+            if actual_category == error && actual_message.contains(message) {
                 Ok(())
             } else {
                 Err(format!(
-                    "expected {want_category} containing {want_message:?}, got {category}: {message}"
+                    "expected {error} containing {message:?}, got {actual_category}: {actual_message}"
                 ))
             }
         }
-        (want, got) => Err(format!("expected {want}, got {got:?}")),
+        (expected, actual) => Err(format!("expected {expected:?}, got {actual:?}")),
+    }
+}
+
+fn check_parent(spec: &VectorSpec, by_id: &HashMap<&str, &VectorSpec>, failures: &mut Vec<String>) {
+    if let Some(parent_id) = &spec.parent {
+        let parent = by_id
+            .get(parent_id.as_str())
+            .unwrap_or_else(|| panic!("{}: unknown parent {parent_id}", spec.id));
+        for mode in Mode::ALL {
+            if !matches!(mode.expected(parent), ExpectedLibrary::Accept) {
+                failures.push(format!(
+                    "{}: parent {} is not accepted ({mode:?})",
+                    spec.id, parent.id
+                ));
+            }
+        }
+    }
+}
+
+fn check_library(spec: &VectorSpec, vector: &Vector, failures: &mut Vec<String>) {
+    for mode in Mode::ALL {
+        if let Err(error) = check(mode.expected(spec), &verify_library(vector, mode)) {
+            failures.push(format!("{} [{mode:?}]: {error}", vector.id));
+        }
+    }
+}
+
+fn check_profile(spec: &VectorSpec, vector: &Vector, failures: &mut Vec<String>) {
+    let actual = profile::check(vector);
+    let expected = &spec.expected.profile;
+    let matches = match (expected, &actual) {
+        (ExpectedProfile::Accept, Ok(())) => true,
+        (ExpectedProfile::Reject { clause }, Err(actual_clause)) => {
+            clause.as_str() == *actual_clause
+        }
+        _ => false,
+    };
+    if !matches {
+        failures.push(format!(
+            "{} [profile]: expected {expected:?}, got {actual:?}",
+            vector.id
+        ));
+    }
+    if spec.category == "profile-negative" && !matches!(expected, ExpectedProfile::Reject { .. }) {
+        failures.push(format!(
+            "{}: profile-negative must be rejected by the profile",
+            vector.id
+        ));
     }
 }
 
 #[test]
 fn managed_key_corpus() {
-    let manifest: Value =
-        serde_json::from_str(&fs::read_to_string(corpus_dir().join("manifest.json")).unwrap())
-            .unwrap();
-    let specs = manifest["vectors"].as_array().unwrap();
+    let manifest = manifest();
+    let specs = &manifest.vectors;
     assert!(specs.len() >= 40, "corpus unexpectedly small");
-    let by_id: HashMap<&str, &Value> = specs
-        .iter()
-        .map(|s| (s["id"].as_str().unwrap(), s))
-        .collect();
-
+    let by_id = specs.iter().map(|spec| (spec.id.as_str(), spec)).collect();
     let mut failures = Vec::new();
     for spec in specs {
-        let v = load(spec);
-        let expected = &spec["expected"];
-
+        let vector = load(spec);
         // Each negative is a mutation of a parent that is itself accepted.
-        if let Some(parent) = spec["parent"].as_str() {
-            let parent = by_id
-                .get(parent)
-                .unwrap_or_else(|| panic!("{}: unknown parent {parent}", v.id));
-            for mode in ["library", "library_checkpoint_log_binding"] {
-                if parent["expected"][mode]["result"] != "accept" {
-                    failures.push(format!(
-                        "{}: parent {} is not accepted ({mode})",
-                        v.id, parent["id"]
-                    ));
-                }
-            }
-        }
-
-        for (mode, bind) in [("library", false), ("library_checkpoint_log_binding", true)] {
-            if let Err(e) = check(&expected[mode], &verify_library(&v, bind)) {
-                failures.push(format!("{} [{mode}]: {e}", v.id));
-            }
-        }
-
-        let actual = profile::check(&v);
-        let want = &expected["profile"];
-        let ok = match (want["result"].as_str().unwrap(), &actual) {
-            ("accept", Ok(())) => true,
-            ("reject", Err(clause)) => *clause == want["clause"].as_str().unwrap(),
-            _ => false,
-        };
-        if !ok {
-            failures.push(format!(
-                "{} [profile]: expected {want}, got {actual:?}",
-                v.id
-            ));
-        }
-
-        if spec["category"] == "profile-negative" && expected["profile"]["result"] != "reject" {
-            failures.push(format!(
-                "{}: profile-negative must be rejected by the profile",
-                v.id
-            ));
-        }
+        check_parent(spec, &by_id, &mut failures);
+        check_library(spec, &vector, &mut failures);
+        check_profile(spec, &vector, &mut failures);
     }
     assert!(
         failures.is_empty(),
@@ -166,42 +232,35 @@ fn managed_key_corpus() {
     );
 }
 
-/// Vectors that target different timestamp checks (a corrupted token, an
-/// untrusted authority, a token over another signature) must each record a
-/// reason that the others' actual errors do not satisfy, so that one of them
-/// failing for another's reason is caught.
+/// Timestamp negatives must have distinct reasons, so a failure at the wrong
+/// timestamp check cannot satisfy the vector's expectation.
 #[test]
 fn timestamp_negatives_record_distinct_reasons() {
-    let manifest: Value =
-        serde_json::from_str(&fs::read_to_string(corpus_dir().join("manifest.json")).unwrap())
-            .unwrap();
-    let cases: Vec<(String, Value, Outcome)> = manifest["vectors"]
-        .as_array()
-        .unwrap()
+    let manifest = manifest();
+    let cases: Vec<_> = manifest
+        .vectors
         .iter()
         .filter(|spec| {
-            spec["category"] == "standard-negative"
-                && spec["expected"]["library"]["error"]
-                    .as_str()
-                    .is_some_and(|e| e.starts_with("Timestamp."))
+            spec.category == "standard-negative"
+                && matches!(&spec.expected.library, ExpectedLibrary::Reject { error, .. }
+                    if error.starts_with("Timestamp."))
         })
-        .map(|spec| {
-            let v = load(spec);
-            let actual = verify_library(&v, false);
-            (v.id, spec["expected"]["library"].clone(), actual)
-        })
+        .map(|spec| (spec, verify_library(&load(spec), Mode::Default)))
         .collect();
     assert!(
         cases.len() >= 3,
         "expected at least three timestamp negatives"
     );
-    for (id, expected, actual) in &cases {
-        assert!(check(expected, actual).is_ok(), "{id}: {actual:?}");
-        for (other, _, other_actual) in &cases {
-            if other != id {
+    for (spec, actual) in &cases {
+        let expected = &spec.expected.library;
+        assert!(check(expected, actual).is_ok(), "{}: {actual:?}", spec.id);
+        for (other, other_actual) in &cases {
+            if other.id != spec.id {
                 assert!(
                     check(expected, other_actual).is_err(),
-                    "{id}'s expected reason also matches {other}'s error {other_actual:?}"
+                    "{}'s expected reason also matches {}'s error {other_actual:?}",
+                    spec.id,
+                    other.id
                 );
             }
         }
@@ -216,22 +275,16 @@ mod profile {
     const MEDIA_TYPE: &str = "application/vnd.dev.sigstore.bundle.v0.3+json";
 
     /// The first clause the vector violates, or `Ok` if it satisfies them all.
-    pub(super) fn check(v: &Vector) -> Result<(), &'static str> {
+    pub(super) fn check(vector: &Vector) -> Result<(), &'static str> {
         // MK-4: no duplicate member names anywhere in the JSON.
-        serde_json::from_str::<NoDuplicateKeys>(&v.raw).map_err(|_| "MK-4")?;
-        let json: Value = serde_json::from_str(&v.raw).map_err(|_| "MK-4")?;
+        serde_json::from_str::<NoDuplicateKeys>(&vector.bundle_json).map_err(|_| "MK-4")?;
+        let json: Value = serde_json::from_str(&vector.bundle_json).map_err(|_| "MK-4")?;
 
         // MK-4: one variant per oneof: content and verification material.
         let material = &json["verificationMaterial"];
         let contents = ["messageSignature", "dsseEnvelope"];
         let variants = ["publicKey", "certificate", "x509CertificateChain"];
-        if contents.iter().filter(|k| json.get(**k).is_some()).count() > 1
-            || variants
-                .iter()
-                .filter(|k| material.get(**k).is_some())
-                .count()
-                > 1
-        {
+        if count_present(&json, &contents) > 1 || count_present(material, &variants) > 1 {
             return Err("MK-4");
         }
         // MK-1: exactly the v0.3 media type.
@@ -248,7 +301,10 @@ mod profile {
             return Err("MK-3");
         }
         // MK-5: exactly one log entry, a Rekor v2 hashedrekord 0.0.2 entry.
-        let entries = material["tlogEntries"].as_array().map_or(&[][..], |e| e);
+        let entries = material["tlogEntries"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         if entries.len() != 1
             || entries[0]["kindVersion"]["kind"] != "hashedrekord"
             || entries[0]["kindVersion"]["version"] != "0.0.2"
@@ -269,11 +325,17 @@ mod profile {
         }
         // MK-7 / MK-8: library verification with log checks and checkpoint
         // binding; a timestamp failure is MK-7.
-        match verify_library(v, true) {
+        match verify_library(vector, Mode::CheckpointLogBinding) {
             Ok(()) => Ok(()),
             Err((category, _)) if category.starts_with("Timestamp.") => Err("MK-7"),
             Err(_) => Err("MK-8"),
         }
+    }
+
+    fn count_present(object: &Value, keys: &[&str]) -> usize {
+        keys.iter()
+            .filter(|key| object.get(**key).is_some())
+            .count()
     }
 
     /// Deserializes any JSON value, failing on a repeated member name.
