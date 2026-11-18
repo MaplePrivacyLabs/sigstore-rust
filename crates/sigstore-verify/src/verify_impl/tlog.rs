@@ -289,6 +289,7 @@ fn log_origin(base_url: &str) -> Option<String> {
     }
     match url.host()? {
         url::Host::Domain(domain) if !domain.is_empty() => Some(domain.to_string()),
+        // Defensive: http(s) URL parsing does not normally produce empty hosts.
         url::Host::Domain(_) => None,
         url::Host::Ipv4(address) => Some(address.to_string()),
         url::Host::Ipv6(address) => Some(address.to_string()),
@@ -454,12 +455,14 @@ mod tests {
     fn test_integrated_time_at_now_accepted() {
         assert!(validate_integrated_time(ts(NOW), ts(NOW), ts(NOW - 600), ts(NOW + 600)).is_ok());
     }
+
     mod checkpoint_log_binding {
         use super::*;
         use base64::engine::general_purpose::STANDARD;
         use base64::Engine;
         use sigstore_crypto::{KeyPair, VerificationKey};
 
+        const KEY_HINT_LEN: usize = 4;
         const ORIGIN_A: &str = "log-a.example.com";
         const ORIGIN_B: &str = "log-b.example.com";
         const BODY: &[u8] = br#"{"apiVersion":"0.0.2","kind":"hashedrekord","spec":{}}"#;
@@ -481,8 +484,9 @@ mod tests {
 
             /// A signature line for `note` under `name` with this log's key.
             fn sign(&self, name: &str, note: &str) -> String {
-                let mut sig = self.id.as_bytes()[..4].to_vec();
+                let mut sig = self.id.as_bytes()[..KEY_HINT_LEN].to_vec();
                 sig.extend_from_slice(self.key.sign(note.as_bytes()).unwrap().as_bytes());
+                // Signed-note signature lines start with an em dash.
                 format!("\u{2014} {name} {}\n", STANDARD.encode(sig))
             }
         }
@@ -491,7 +495,7 @@ mod tests {
             log_a: Log,
             log_b: Log,
             keyring: Keyring,
-            logs: RekorLogs,
+            rekor_logs: RekorLogs,
         }
 
         impl Fixture {
@@ -510,7 +514,7 @@ mod tests {
                     log_a,
                     log_b,
                     keyring,
-                    logs: RekorLogs { origins },
+                    rekor_logs: RekorLogs { origins },
                 }
             }
 
@@ -545,8 +549,12 @@ mod tests {
             }
 
             fn verify_with_binding(&self, entry: &TransparencyLogEntry) -> Result<()> {
-                verify_entry_inclusion(entry, &self.keyring, Some(&self.logs))
+                verify_entry_inclusion(entry, &self.keyring, Some(&self.rekor_logs))
             }
+        }
+
+        fn checkpoint(note: &str, lines: &[String]) -> String {
+            format!("{note}\n{}", lines.concat())
         }
 
         fn assert_checkpoint_error(result: Result<()>, expected: &str) {
@@ -559,75 +567,77 @@ mod tests {
 
         #[test]
         fn test_own_log_signature_passes_either_way() {
-            let logs = Fixture::new();
+            let fixture = Fixture::new();
             let note = Fixture::note(ORIGIN_A);
             let entry = Fixture::entry(
-                &logs.log_a.id,
-                &format!("{note}\n{}", logs.log_a.sign(ORIGIN_A, &note)),
+                &fixture.log_a.id,
+                &checkpoint(&note, &[fixture.log_a.sign(ORIGIN_A, &note)]),
             );
-            logs.verify_default(&entry).unwrap();
-            logs.verify_with_binding(&entry).unwrap();
+            fixture.verify_default(&entry).unwrap();
+            fixture.verify_with_binding(&entry).unwrap();
         }
 
         #[test]
         fn test_witness_and_other_log_lines_are_ignored_when_the_log_signed() {
-            let logs = Fixture::new();
+            let fixture = Fixture::new();
             let note = Fixture::note(ORIGIN_A);
             let witness = Log::new("witness.example.org");
-            let checkpoint = format!(
-                "{note}\n{}{}{}",
-                witness.sign(witness.origin, &note),
-                logs.log_b.sign(ORIGIN_B, &note),
-                logs.log_a.sign(ORIGIN_A, &note),
+            let checkpoint = checkpoint(
+                &note,
+                &[
+                    witness.sign(witness.origin, &note),
+                    fixture.log_b.sign(ORIGIN_B, &note),
+                    fixture.log_a.sign(ORIGIN_A, &note),
+                ],
             );
-            let entry = Fixture::entry(&logs.log_a.id, &checkpoint);
-            logs.verify_default(&entry).unwrap();
-            logs.verify_with_binding(&entry).unwrap();
+            let entry = Fixture::entry(&fixture.log_a.id, &checkpoint);
+            fixture.verify_default(&entry).unwrap();
+            fixture.verify_with_binding(&entry).unwrap();
         }
 
         #[test]
         fn test_checkpoint_from_another_trusted_log_is_rejected_only_with_binding() {
             // Accepted by default, as in earlier releases; rejected when the
             // checkpoint must come from the entry's own log.
-            let logs = Fixture::new();
+            let fixture = Fixture::new();
             let note = Fixture::note(ORIGIN_A);
             let entry = Fixture::entry(
-                &logs.log_a.id,
-                &format!("{note}\n{}", logs.log_b.sign(ORIGIN_A, &note)),
+                &fixture.log_a.id,
+                &checkpoint(&note, &[fixture.log_b.sign(ORIGIN_A, &note)]),
             );
-            logs.verify_default(&entry).unwrap();
+            fixture.verify_default(&entry).unwrap();
             assert_checkpoint_error(
-                logs.verify_with_binding(&entry),
+                fixture.verify_with_binding(&entry),
                 "checkpoint has no valid signature from the entry's log",
             );
         }
 
         #[test]
         fn test_checkpoint_origin_must_be_the_entry_logs() {
-            let logs = Fixture::new();
+            let fixture = Fixture::new();
             let note = Fixture::note(ORIGIN_B);
             let entry = Fixture::entry(
-                &logs.log_a.id,
-                &format!("{note}\n{}", logs.log_a.sign(ORIGIN_B, &note)),
+                &fixture.log_a.id,
+                &checkpoint(&note, &[fixture.log_a.sign(ORIGIN_B, &note)]),
             );
-            logs.verify_default(&entry).unwrap();
+            fixture.verify_default(&entry).unwrap();
             assert_checkpoint_error(
-                logs.verify_with_binding(&entry),
+                fixture.verify_with_binding(&entry),
                 "checkpoint origin \"log-b.example.com\" does not match the entry's log \"log-a.example.com\"",
             );
         }
 
         #[test]
         fn test_log_signature_line_must_carry_the_log_origin() {
-            let logs = Fixture::new();
+            let fixture = Fixture::new();
             let note = Fixture::note(ORIGIN_A);
             let entry = Fixture::entry(
-                &logs.log_a.id,
-                &format!("{note}\n{}", logs.log_a.sign("someone-else.example", &note)),
+                &fixture.log_a.id,
+                &checkpoint(&note, &[fixture.log_a.sign("someone-else.example", &note)]),
             );
-            logs.verify_default(&entry).unwrap();
+            fixture.verify_default(&entry).unwrap();
             assert_checkpoint_error(
-                logs.verify_with_binding(&entry),
+                fixture.verify_with_binding(&entry),
                 "checkpoint has no valid signature from the entry's log",
             );
         }
@@ -638,38 +648,38 @@ mod tests {
             // record, so for v1 entries only the signing key is bound: a
             // checkpoint from A's key under another origin is accepted, while
             // B's key is still rejected.
-            let logs = Fixture::new();
+            let fixture = Fixture::new();
             let v1 = |checkpoint: &str| {
-                let mut entry = Fixture::entry(&logs.log_a.id, checkpoint);
+                let mut entry = Fixture::entry(&fixture.log_a.id, checkpoint);
                 entry.kind_version = sigstore_types::KindVersion::HashedRekordV001;
                 entry
             };
             let note = Fixture::note("other-origin.example.com - 42");
-            let entry = v1(&format!(
-                "{note}\n{}",
-                logs.log_a.sign("other-origin.example.com", &note)
+            let entry = v1(&checkpoint(
+                &note,
+                &[fixture.log_a.sign("other-origin.example.com", &note)],
             ));
-            logs.verify_with_binding(&entry).unwrap();
-            let entry = v1(&format!("{note}\n{}", logs.log_b.sign(ORIGIN_B, &note)));
-            logs.verify_default(&entry).unwrap();
+            fixture.verify_with_binding(&entry).unwrap();
+            let entry = v1(&checkpoint(&note, &[fixture.log_b.sign(ORIGIN_B, &note)]));
+            fixture.verify_default(&entry).unwrap();
             assert_checkpoint_error(
-                logs.verify_with_binding(&entry),
+                fixture.verify_with_binding(&entry),
                 "checkpoint has no valid signature from the entry's log",
             );
         }
 
         #[test]
         fn test_entry_naming_an_untrusted_log_is_rejected() {
-            let logs = Fixture::new();
+            let fixture = Fixture::new();
             let note = Fixture::note(ORIGIN_A);
             let unknown = sigstore_crypto::sha256(b"unknown");
             let entry = Fixture::entry(
                 &unknown,
-                &format!("{note}\n{}", logs.log_a.sign(ORIGIN_A, &note)),
+                &checkpoint(&note, &[fixture.log_a.sign(ORIGIN_A, &note)]),
             );
-            logs.verify_default(&entry).unwrap();
+            fixture.verify_default(&entry).unwrap();
             assert!(matches!(
-                logs.verify_with_binding(&entry),
+                fixture.verify_with_binding(&entry),
                 Err(Error::TransparencyLog(
                     crate::error::TransparencyLogError::UnknownLog { .. }
                 ))
@@ -689,7 +699,10 @@ mod tests {
                 Some("log2025-alpha3.rekor.sigstage.dev"),
             ),
             // Port, path, query and fragment are ignored; case is normalized.
-            ("https://Example.COM:8443/path?q#logs", Some("example.com")),
+            (
+                "https://Example.COM:8443/path?q#fragment",
+                Some("example.com"),
+            ),
             ("http://log.example", Some("log.example")),
             ("https://[2001:db8::1]:443/", Some("2001:db8::1")),
             ("https://192.0.2.1", Some("192.0.2.1")),

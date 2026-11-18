@@ -6,7 +6,7 @@
 //! rejected one must fail with the recorded error category and message. A
 //! vector failing for any other reason is a test failure.
 //!
-//! Vectors also carry the expected outcome under the strict profile described in
+//! Vectors also carry the expected outcome under the managed-key profile described in
 //! `test-vectors/managed-key/PROFILE.md`. The [`profile`] module below is a
 //! test-only reference implementation of that profile, so that profile-only
 //! negatives (most of which this library accepts) are also checked to fail for
@@ -60,18 +60,18 @@ enum ExpectedProfile {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum Mode {
+enum CheckpointBinding {
     Default,
-    CheckpointLogBinding,
+    Required,
 }
 
-impl Mode {
-    const ALL: [Self; 2] = [Self::Default, Self::CheckpointLogBinding];
+impl CheckpointBinding {
+    const ALL: [Self; 2] = [Self::Default, Self::Required];
 
     fn expected(self, spec: &VectorSpec) -> &ExpectedLibrary {
         match self {
             Self::Default => &spec.expected.library,
-            Self::CheckpointLogBinding => &spec.expected.library_checkpoint_log_binding,
+            Self::Required => &spec.expected.library_checkpoint_log_binding,
         }
     }
 
@@ -79,7 +79,7 @@ impl Mode {
         let policy = PublicKeyVerificationPolicy::new(key);
         match self {
             Self::Default => policy,
-            Self::CheckpointLogBinding => policy.require_checkpoint_log_binding(),
+            Self::Required => policy.require_checkpoint_log_binding(),
         }
     }
 }
@@ -114,7 +114,7 @@ fn load(spec: &VectorSpec) -> Vector {
 /// The library outcome: `Ok` or (error category, message).
 type Outcome = Result<(), (String, String)>;
 
-fn verify_library(vector: &Vector, mode: Mode) -> Outcome {
+fn verify_library(vector: &Vector, mode: CheckpointBinding) -> Outcome {
     let bundle = Bundle::from_json(&vector.bundle_json)
         .map_err(|error| ("Parse".to_string(), error.to_string()))?;
     verify(
@@ -168,7 +168,7 @@ fn check_parent(spec: &VectorSpec, by_id: &HashMap<&str, &VectorSpec>, failures:
         let parent = by_id
             .get(parent_id.as_str())
             .unwrap_or_else(|| panic!("{}: unknown parent {parent_id}", spec.id));
-        for mode in Mode::ALL {
+        for mode in CheckpointBinding::ALL {
             if !matches!(mode.expected(parent), ExpectedLibrary::Accept) {
                 failures.push(format!(
                     "{}: parent {} is not accepted ({mode:?})",
@@ -180,7 +180,7 @@ fn check_parent(spec: &VectorSpec, by_id: &HashMap<&str, &VectorSpec>, failures:
 }
 
 fn check_library(spec: &VectorSpec, vector: &Vector, failures: &mut Vec<String>) {
-    for mode in Mode::ALL {
+    for mode in CheckpointBinding::ALL {
         if let Err(error) = check(mode.expected(spec), &verify_library(vector, mode)) {
             failures.push(format!("{} [{mode:?}]: {error}", vector.id));
         }
@@ -215,7 +215,7 @@ fn check_profile(spec: &VectorSpec, vector: &Vector, failures: &mut Vec<String>)
 fn managed_key_corpus() {
     let manifest = manifest();
     let specs = &manifest.vectors;
-    assert!(specs.len() >= 40, "corpus unexpectedly small");
+    assert_eq!(specs.len(), 44, "unexpected number of corpus vectors");
     let by_id = specs.iter().map(|spec| (spec.id.as_str(), spec)).collect();
     let mut failures = Vec::new();
     for spec in specs {
@@ -245,7 +245,12 @@ fn timestamp_negatives_record_distinct_reasons() {
                 && matches!(&spec.expected.library, ExpectedLibrary::Reject { error, .. }
                     if error.starts_with("Timestamp."))
         })
-        .map(|spec| (spec, verify_library(&load(spec), Mode::Default)))
+        .map(|spec| {
+            (
+                spec,
+                verify_library(&load(spec), CheckpointBinding::Default),
+            )
+        })
         .collect();
     assert!(
         cases.len() >= 3,
@@ -325,7 +330,7 @@ mod profile {
         }
         // MK-7 / MK-8: library verification with log checks and checkpoint
         // binding; a timestamp failure is MK-7.
-        match verify_library(vector, Mode::CheckpointLogBinding) {
+        match verify_library(vector, CheckpointBinding::Required) {
             Ok(()) => Ok(()),
             Err((category, _)) if category.starts_with("Timestamp.") => Err("MK-7"),
             Err(_) => Err("MK-8"),

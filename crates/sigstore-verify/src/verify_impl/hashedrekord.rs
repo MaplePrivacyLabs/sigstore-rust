@@ -155,8 +155,9 @@ fn v002_digest_algorithm(logged: &HashedRekordV002Data) -> Result<HashAlgorithm>
     Ok(algorithm)
 }
 
+/// Read the algorithm of the entry's sole public-key or certificate verifier.
 fn logged_key_algorithm(verifier: &HashedRekordV002Verifier) -> Result<KeyAlgorithm> {
-    let algorithm = match (&verifier.public_key, &verifier.x509_certificate) {
+    Ok(match (&verifier.public_key, &verifier.x509_certificate) {
         (Some(key), None) => KeyAlgorithm::from_spki(&key.raw_bytes).map_err(|e| {
             Error::malformed_entry(format!("invalid public key in Rekor entry: {e}"))
         })?,
@@ -177,8 +178,7 @@ fn logged_key_algorithm(verifier: &HashedRekordV002Verifier) -> Result<KeyAlgori
                 "Rekor entry verifier has neither a public key nor a certificate".to_string(),
             ))
         }
-    };
-    Ok(algorithm)
+    })
 }
 
 /// Validate that the certificate in Rekor matches the certificate in the bundle
@@ -399,9 +399,13 @@ mod tests {
 
     fn statement() -> Vec<u8> {
         let subject = sigstore_crypto::sha256(b"artifact").to_hex();
-        format!(
-            r#"{{"_type":"https://in-toto.io/Statement/v1","subject":[{{"name":"a","digest":{{"sha256":"{subject}"}}}}],"predicateType":"https://example.com/predicate/v1","predicate":{{}}}}"#
-        )
+        json!({
+            "_type": "https://in-toto.io/Statement/v1",
+            "subject": [{"name": "a", "digest": {"sha256": subject}}],
+            "predicateType": "https://example.com/predicate/v1",
+            "predicate": {},
+        })
+        .to_string()
         .into_bytes()
     }
 
@@ -518,6 +522,13 @@ mod tests {
         }
     }
 
+    fn assert_malformed_entry(result: Result<()>) -> String {
+        match result {
+            Err(Error::TransparencyLog(TransparencyLogError::MalformedEntry(message))) => message,
+            other => panic!("expected malformed entry, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_p384_dsse_entry_binds_sha384_of_pae() {
         Entry::conforming_p384().verify(P384_KEY).unwrap();
@@ -573,11 +584,8 @@ mod tests {
     fn test_digest_length_must_match_the_algorithm() {
         let mut entry = Entry::conforming_p384();
         entry.digest.truncate(32);
-        match entry.verify(P384_KEY) {
-            Err(Error::TransparencyLog(TransparencyLogError::MalformedEntry(m)))
-                if m.contains("SHA2_384 digest is 32 bytes, expected 48") => {}
-            other => panic!("unexpected result {other:?}"),
-        }
+        let message = assert_malformed_entry(entry.verify(P384_KEY));
+        assert!(message.contains("SHA2_384 digest is 32 bytes, expected 48"));
     }
 
     #[test]
@@ -650,11 +658,6 @@ mod tests {
             key_details: "PKIX_ECDSA_P384_SHA_256",
             ..Entry::conforming_p384()
         };
-        assert!(matches!(
-            entry.verify(P384_KEY),
-            Err(Error::TransparencyLog(
-                TransparencyLogError::MalformedEntry(_)
-            ))
-        ));
+        assert_malformed_entry(entry.verify(P384_KEY));
     }
 }
