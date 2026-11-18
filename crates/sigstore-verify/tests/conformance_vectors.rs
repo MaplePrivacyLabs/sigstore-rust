@@ -53,20 +53,18 @@ fn policy(dir: &Path, binding: CheckpointBinding) -> Result<Box<dyn Policy>, Str
         let pem = fs::read_to_string(dir.join("key.pub")).map_err(|e| e.to_string())?;
         let key = DerPublicKey::from_pem(&pem).map_err(|e| format!("key: {e}"))?;
         let policy = PublicKeyVerificationPolicy::new(key);
-        Box::new(if matches!(binding, CheckpointBinding::Required) {
-            policy.require_checkpoint_log_binding()
-        } else {
-            policy
+        Box::new(match binding {
+            CheckpointBinding::Default => policy,
+            CheckpointBinding::Required => policy.require_checkpoint_log_binding(),
         })
     } else {
         let identity =
             read_trimmed(&dir.join("identity")).unwrap_or_else(|| DEFAULT_IDENTITY.into());
         let issuer = read_trimmed(&dir.join("issuer")).unwrap_or_else(|| DEFAULT_ISSUER.into());
         let policy = VerificationPolicy::new(identity, issuer);
-        Box::new(if matches!(binding, CheckpointBinding::Required) {
-            policy.require_checkpoint_log_binding()
-        } else {
-            policy
+        Box::new(match binding {
+            CheckpointBinding::Default => policy,
+            CheckpointBinding::Required => policy.require_checkpoint_log_binding(),
         })
     };
     Ok(policy)
@@ -93,10 +91,9 @@ fn verify_vector(
     let root = trusted_root(dir)?;
     let policy = policy(dir, binding)?;
     let bytes = artifact_bytes(dir)?;
-    let artifact = if matches!(input, ArtifactInput::Digest) {
-        Artifact::from(sigstore_crypto::sha256(&bytes))
-    } else {
-        Artifact::from(bytes.as_slice())
+    let artifact = match input {
+        ArtifactInput::Bytes => Artifact::from(bytes.as_slice()),
+        ArtifactInput::Digest => Artifact::from(sigstore_crypto::sha256(&bytes)),
     };
     verify(artifact, &bundle, policy.as_ref(), &root)
         .map(|_| ())
