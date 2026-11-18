@@ -2,9 +2,8 @@
 
 Accept and reject vectors for verifying a DSSE in-toto bundle signed with a
 managed (non-certificate) key, logged in Rekor v2 as a `hashedrekord` 0.0.2
-entry and timestamped by an RFC 3161 authority. They cover P-384 (the case this
-library previously rejected), P-256 regressions, and the binding of each piece
-of evidence to the signature. The statements are synthetic.
+entry and timestamped by an RFC 3161 authority. They cover P-384 and P-256
+signatures and the binding of each piece of evidence to the signature. The statements are synthetic.
 
 `manifest.json` lists every vector. For each one it records:
 
@@ -13,12 +12,14 @@ of evidence to the signature. The statements are synthetic.
 - the expected library outcome, with and without `require_checkpoint_log_binding()`;
 - for rejections, the expected error category and message, and a language-neutral
   reason code (see [Reason codes](#reason-codes));
-- the outcome under the strict profile in [PROFILE.md](PROFILE.md), with the clause
-  and reason code for rejections;
+- the outcome under the [managed-key profile](PROFILE.md), with the clause and
+  reason code for rejections;
 - the outcome the pinned Cosign gives.
 
-`crates/sigstore-verify/tests/managed_key_corpus.rs` asserts all of this. A
-vector that fails for a reason other than the recorded one fails the test.
+`crates/sigstore-verify/tests/managed_key_corpus.rs` checks the recorded library
+outcomes and managed-key profile clauses. Rejections must match the Rust error
+category/message or profile clause; language-neutral codes are recorded for
+other verifiers and are not directly asserted by the Rust runner.
 
 The official sigstore-conformance vectors are vendored separately in
 `../sigstore-conformance` and run by `tests/conformance_vectors.rs`. This corpus
@@ -65,8 +66,10 @@ with that root. That shows the re-logging itself is correct, so the body change
 is the only difference in each child.
 
 **Test logs.**
+
 - Two Ed25519 Rekor v2 logs, A and B, are identified by their signed-note key ID.
-- One ECDSA P-256 Rekor v1 log, as Rekor v1 uses, is identified by SHA-256 of its key and signs with RFC 6979 deterministic nonces.
+- One ECDSA P-256 Rekor v1 log is identified by SHA-256 of its public key and
+  signs with RFC 6979 deterministic nonces.
 
 Their private keys are derived from fixed public strings in `generate.py`. They
 are test-only and must never be trusted outside `roots/test.json`.
@@ -76,9 +79,12 @@ accepts it against the test root. It is synthetic: no public Rekor v1 entry was
 made.
 
 **Categories.**
+
 - `standard-negative`: rejected by this library and by Cosign.
 - `binding-negative`: accepted by default, rejected with checkpoint-to-log binding.
-- `profile-negative`: targets a requirement of the stricter profile in PROFILE.md and cites its clause. The profile rejects every such vector. The library's own outcome is recorded per mode and is usually acceptance, but some of these vectors are also rejected by the library for another reason (for example a missing media type, an invalid added SET, or a `null` integratedTime). Read each vector's expected outcomes rather than inferring them from the category.
+- `profile-negative`: targets the [managed-key profile](PROFILE.md) and cites
+  the violated clause. Library outcomes are recorded separately per mode; read
+  them rather than inferring acceptance from the category.
 
 `cosign: null` marks cases Cosign is not expected to judge.
 
@@ -87,7 +93,7 @@ made.
 Every rejection in the manifest carries a `code`, so a verifier written in
 another language can check that it rejects each vector for the same reason
 without matching this library's error messages. The codes name the first check
-that fails. For the strict profile, a clause checked before library
+that fails. For the managed-key profile, a clause checked before library
 verification has its own code; a rejection by library verification (MK-7
 timestamp failures and MK-8) carries the code of the library error with
 checkpoint-to-log binding on.
@@ -109,7 +115,7 @@ checkpoint-to-log binding on.
 | `inclusion-promise-missing` | an inclusion promise is required and absent |
 | `inclusion-promise-invalid` | the inclusion promise (SET) does not verify |
 | `checkpoint-origin-mismatch` | the checkpoint origin is not the entry's log |
-| `checkpoint-signature-invalid` | the checkpoint has no valid signature from the (entry's) log |
+| `checkpoint-signature-invalid` | the checkpoint has no valid signature from a trusted log (with binding enabled: the entry's log) |
 | `tlog-key-details-mismatch` | the logged key details do not match the logged key |
 | `tlog-digest-algorithm-mismatch` | the logged digest algorithm does not match the key details |
 | `tlog-digest-malformed` | the logged digest has the wrong length for its algorithm |
