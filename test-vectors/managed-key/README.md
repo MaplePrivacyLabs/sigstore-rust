@@ -3,7 +3,8 @@
 Accept and reject vectors for verifying a DSSE in-toto bundle signed with a
 managed (non-certificate) key, logged in Rekor v2 as a `hashedrekord` 0.0.2
 entry and timestamped by an RFC 3161 authority. They cover P-384 and P-256
-signatures and the binding of each piece of evidence to the signature. The statements are synthetic.
+signatures and the binding of each piece of evidence to the signature. The
+statements are synthetic.
 
 `manifest.json` lists every vector. For each one it records:
 

@@ -67,7 +67,7 @@ def main(cosign):
         detail = (result.stderr.strip().splitlines() or [""])[-1][:160]
         status = "ok" if actual == expected else "MISMATCH"
         mismatches += actual != expected
-        print(f"{status:8} {vector["id"]}: recorded {expected}, cosign {actual}  {detail}")
+        print(f"{status:8} {vector['id']}: recorded {expected}, cosign {actual}  {detail}")
     print(f"{mismatches} mismatches")
     return 1 if mismatches else 0
 
