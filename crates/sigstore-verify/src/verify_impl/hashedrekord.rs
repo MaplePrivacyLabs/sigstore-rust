@@ -6,7 +6,7 @@
 use crate::artifact::PreparedArtifact;
 use crate::error::{Error, Result};
 use sigstore_crypto::{parse_certificate_info, ArtifactHasher, KeyAlgorithm};
-use sigstore_rekor::body::{HashedRekordV002Data, RekorEntryBody};
+use sigstore_rekor::body::{HashedRekordV002Data, HashedRekordV002Verifier, RekorEntryBody};
 use sigstore_rekor::RekorV2KeyDetails;
 use sigstore_types::bundle::VerificationMaterialContent;
 use sigstore_types::{
@@ -61,7 +61,7 @@ pub(crate) fn verify_hashedrekord_entry(
             // digest algorithm and digest length must all agree with them
             // before the digest itself is compared.
             let logged = &rekord.spec.hashed_rekord_v002;
-            let algorithm = validate_v002_algorithms(logged)?;
+            let algorithm = v002_digest_algorithm(logged)?;
             let hash = match &bundle.content {
                 SignatureContent::MessageSignature(_) => artifact.digest(algorithm)?,
                 SignatureContent::DsseEnvelope(envelope) => {
@@ -116,8 +116,9 @@ fn validate_artifact_hash(artifact_hash: &[u8], expected_hash: &[u8]) -> Result<
 /// A Rekor v2 log derives the digest algorithm from the key details, so an
 /// entry whose fields disagree was not produced by a conforming log for this
 /// signature.
-fn validate_v002_algorithms(logged: &HashedRekordV002Data) -> Result<HashAlgorithm> {
-    let key_details = logged.signature.verifier.key_details;
+fn v002_digest_algorithm(logged: &HashedRekordV002Data) -> Result<HashAlgorithm> {
+    let verifier = &logged.signature.verifier;
+    let key_details = verifier.key_details;
     let expected_key = match key_details {
         RekorV2KeyDetails::PkixEcdsaP256Sha256 => KeyAlgorithm::EcdsaP256,
         RekorV2KeyDetails::PkixEcdsaP384Sha384 => KeyAlgorithm::EcdsaP384,
@@ -128,29 +129,7 @@ fn validate_v002_algorithms(logged: &HashedRekordV002Data) -> Result<HashAlgorit
         }
     };
 
-    let verifier = &logged.signature.verifier;
-    let logged_key = match (&verifier.public_key, &verifier.x509_certificate) {
-        (Some(key), None) => KeyAlgorithm::from_spki(&key.raw_bytes).map_err(|e| {
-            Error::malformed_entry(format!("invalid public key in Rekor entry: {e}"))
-        })?,
-        (None, Some(cert)) => {
-            parse_certificate_info(&cert.raw_bytes)
-                .map_err(|e| {
-                    Error::malformed_entry(format!("invalid certificate in Rekor entry: {e}"))
-                })?
-                .key_algorithm
-        }
-        (Some(_), Some(_)) => {
-            return Err(Error::malformed_entry(
-                "Rekor entry verifier has both a public key and a certificate".to_string(),
-            ))
-        }
-        (None, None) => {
-            return Err(Error::malformed_entry(
-                "Rekor entry verifier has neither a public key nor a certificate".to_string(),
-            ))
-        }
-    };
+    let logged_key = logged_key_algorithm(verifier)?;
     if logged_key != expected_key {
         return Err(Error::entry_mismatch(format!(
             "Rekor entry key details {key_details} do not match its {logged_key:?} key"
@@ -173,6 +152,32 @@ fn validate_v002_algorithms(logged: &HashedRekordV002Data) -> Result<HashAlgorit
         )));
     }
 
+    Ok(algorithm)
+}
+
+fn logged_key_algorithm(verifier: &HashedRekordV002Verifier) -> Result<KeyAlgorithm> {
+    let algorithm = match (&verifier.public_key, &verifier.x509_certificate) {
+        (Some(key), None) => KeyAlgorithm::from_spki(&key.raw_bytes).map_err(|e| {
+            Error::malformed_entry(format!("invalid public key in Rekor entry: {e}"))
+        })?,
+        (None, Some(cert)) => {
+            parse_certificate_info(&cert.raw_bytes)
+                .map_err(|e| {
+                    Error::malformed_entry(format!("invalid certificate in Rekor entry: {e}"))
+                })?
+                .key_algorithm
+        }
+        (Some(_), Some(_)) => {
+            return Err(Error::malformed_entry(
+                "Rekor entry verifier has both a public key and a certificate".to_string(),
+            ))
+        }
+        (None, None) => {
+            return Err(Error::malformed_entry(
+                "Rekor entry verifier has neither a public key nor a certificate".to_string(),
+            ))
+        }
+    };
     Ok(algorithm)
 }
 
