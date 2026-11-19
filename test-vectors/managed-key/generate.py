@@ -251,6 +251,8 @@ LIBRARY_CODES = (
     ("digest is 32 bytes, expected 48", "tlog-digest-malformed"),
     ("artifact hash mismatch for hashedrekord entry", "tlog-digest-mismatch"),
     ("public key in Rekor entry does not match managed key", "tlog-key-mismatch"),
+    ("message digest in bundle does not match artifact hash", "artifact-mismatch"),
+    ("signature verification failed", "message-signature-invalid"),
     (
         "DSSE signature in bundle does not match signature in Rekor entry",
         "tlog-signature-mismatch",
@@ -278,9 +280,15 @@ def accept():
 
 
 def reject(error, message):
-    codes = [code for text, code in LIBRARY_CODES if text in message]
-    assert len(set(codes)) == 1, f"no single reason code for {message!r}"
-    return {"result": "reject", "error": error, "message": message, "code": codes[0]}
+    matches = [(text, code) for text, code in LIBRARY_CODES if text in message]
+    if not matches:
+        raise AssertionError(f"no reason code for {message!r}")
+    # The longest matching fragment is the most specific classifier ("DSSE signature
+    # verification failed" vs "signature verification failed").
+    longest = max(len(text) for text, _ in matches)
+    codes = {code for text, code in matches if len(text) == longest}
+    assert len(codes) == 1, f"no single reason code for {message!r}"
+    return {"result": "reject", "error": error, "message": message, "code": codes.pop()}
 
 
 def profile_reject(clause, reason):
@@ -366,7 +374,7 @@ class ParentVector:
     artifact: str
     root: str
 
-    def add_mutation(self, corpus, vector_id, bundle, *, key=None, root=None, **details):
+    def add_mutation(self, corpus, vector_id, bundle, *, key=None, artifact=None, root=None, **details):
         """Use this parent's ID/key/artifact/root unless explicitly overridden."""
         corpus.add(
             vector_id,
@@ -374,7 +382,7 @@ class ParentVector:
             source=DERIVED_SOURCE,
             parent=self.id,
             key=key or self.key,
-            artifact=self.artifact,
+            artifact=artifact or self.artifact,
             root=root or self.root,
             **details,
         )
@@ -489,7 +497,20 @@ def generate(out):
             artifact="r3",
             root="production",
         )
+        blob_p384 = ParentVector(
+            id="p384-rekor2-blob-tsa",
+            bundle=runs["blob-p384"]["bundle"],
+            key="blob-p384",
+            artifact="blob-p384",
+            root="production",
+        )
         add_real_positives(corpus, runs, p384=p384, p384_second_key=p384_second_key, p256=p256)
+        # The P-256 blob path has no vector of its own (no P-256 blob bundle was
+        # produced); its signature donor for the substitution negative is the
+        # real p256-rekor2-dsse-tsa bundle. To add a P-256 blob vector later, add
+        # sources/blob-p256/ from a pinned Cosign sign-blob run and extend
+        # add_blob_vectors().
+        add_blob_vectors(corpus, runs, blob_p384=blob_p384, signature_donor=p256, p384_second_key=p384_second_key)
         add_standard_negatives(corpus, p384=p384, p384_second_key=p384_second_key, production=production)
         add_profile_negatives(corpus, p384=p384, p384_second_key=p384_second_key)
         relogged_parent = add_relogged_vectors(
@@ -514,7 +535,7 @@ def prepare_outputs(out):
 
 def load_runs(out):
     runs = {}
-    for run in ("r1", "r2", "r3"):
+    for run in ("r1", "r2", "r3", "blob-p384"):
         source_dir = os.path.join(SOURCES, run)
         runs[run] = {
             "bundle": load_json(os.path.join(source_dir, "bundle.sigstore.json")),
@@ -627,6 +648,119 @@ def add_real_positives(corpus, runs, *, p384, p384_second_key, p256):
         mutation="move the log's signature line after the witness cosignature lines",
         library=accept(),
         cosign="accept",
+    )
+
+
+
+def add_blob_vectors(corpus, runs, *, blob_p384, signature_donor, p384_second_key):
+    corpus.add(
+        "p384-rekor2-blob-tsa",
+        blob_p384.bundle,
+        description=(
+            "P-384 managed key, messageSignature over the artifact, Rekor v2 "
+            "hashedrekord 0.0.2 entry, RFC 3161 timestamp"
+        ),
+        category="positive",
+        source=real_source(runs, "blob-p384"),
+        parent=None,
+        mutation=None,
+        key="blob-p384",
+        artifact="blob-p384",
+        root="production",
+        library=accept(),
+        cosign="accept",
+    )
+    # Wrong key: the bundle checked against a different approved key.
+    bundle = copy.deepcopy(blob_p384.bundle)
+    bundle["verificationMaterial"]["publicKey"]["hint"] = (
+        p384_second_key.bundle["verificationMaterial"]["publicKey"]["hint"]
+    )
+    blob_p384.add_mutation(
+        corpus,
+        "p384-blob-verified-with-other-key",
+        bundle,
+        description=(
+            "Bundle checked against a different approved key (e.g. another "
+            "environment's), with that key's hint"
+        ),
+        category="standard-negative",
+        mutation="set publicKey.hint to the second key's hint and verify with the second key",
+        key="r2",
+        library=reject("SignatureInvalid", "signature verification failed"),
+        profile=profile_reject("MK-8", "library verification fails"),
+        cosign="reject",
+    )
+
+    # Artifact that does not match the signed bytes.
+    blob_p384.add_mutation(
+        corpus,
+        "p384-blob-artifact-mismatch",
+        blob_p384.bundle,
+        description="Bundle verified against a different artifact than the one that was signed",
+        category="standard-negative",
+        mutation="verify against the bytes of artifacts/r1.bin instead of artifacts/blob-p384.bin",
+        artifact="r1",
+        library=reject("ArtifactMismatch", "message digest in bundle does not match artifact hash"),
+        profile=profile_reject("MK-8", "library verification fails"),
+        cosign="reject",
+    )
+
+    # Digest algorithm label swapped to the other algorithm's; digest bytes kept.
+    bundle = copy.deepcopy(blob_p384.bundle)
+    bundle["messageSignature"]["messageDigest"]["algorithm"] = "SHA2_256"
+    blob_p384.add_mutation(
+        corpus,
+        "p384-blob-digest-algorithm-sha256",
+        bundle,
+        description="messageSignature digest labelled SHA2_256; digest bytes unchanged (SHA-384)",
+        category="standard-negative",
+        mutation="set messageDigest.algorithm to SHA2_256, keeping the SHA-384 digest",
+        library=reject("ArtifactMismatch", "message digest in bundle does not match artifact hash"),
+        profile=profile_reject("MK-8", "library verification fails"),
+        cosign="reject",
+    )
+
+    # Digest replaced by the other algorithm's digest of the same artifact; label kept.
+    blob_artifact = open(os.path.join(SOURCES, "blob-p384", "artifact.bin"), "rb").read()
+    bundle = copy.deepcopy(blob_p384.bundle)
+    bundle["messageSignature"]["messageDigest"]["digest"] = b64(sha256(blob_artifact))
+    blob_p384.add_mutation(
+        corpus,
+        "p384-blob-digest-replaced",
+        bundle,
+        description="messageSignature digest replaced by the SHA-256 of the artifact; label kept (SHA2_384)",
+        category="standard-negative",
+        mutation="replace messageDigest.digest with the SHA-256 of the artifact, keeping algorithm SHA2_384",
+        library=reject("ArtifactMismatch", "message digest in bundle does not match artifact hash"),
+        profile=profile_reject("MK-8", "library verification fails"),
+        cosign="reject",
+    )
+
+    # Signature substituted for one from another key over another artifact. The
+    # donor is the real P-256 DSSE bundle (same-key ECDSA is randomized, so a
+    # second valid signature from the same key would verify).
+    bundle = copy.deepcopy(blob_p384.bundle)
+    bundle["messageSignature"]["signature"] = signature_donor.bundle["dsseEnvelope"]["signatures"][0]["sig"]
+    bundle["verificationMaterial"]["timestampVerificationData"] = copy.deepcopy(
+        signature_donor.bundle["verificationMaterial"]["timestampVerificationData"]
+    )
+    blob_p384.add_mutation(
+        corpus,
+        "p384-blob-signature-substituted",
+        bundle,
+        description=(
+            "messageSignature replaced by another key's signature over a different "
+            "message, with that signature's own timestamp; ECDSA is randomized, so "
+            "a second valid signature from the same key would verify"
+        ),
+        category="standard-negative",
+        mutation=(
+            "replace the messageSignature signature and the RFC 3161 timestamp "
+            "with those of p256-rekor2-dsse-tsa"
+        ),
+        library=reject("SignatureInvalid", "signature verification failed"),
+        profile=profile_reject("MK-8", "library verification fails"),
+        cosign="reject",
     )
 
 
@@ -1360,8 +1494,8 @@ def add_p256_binding_vector(corpus, *, p256, production):
 def write_manifest(out, corpus, runs, *, logs):
     manifest = {
         "description": (
-            "Managed-key DSSE / Rekor v2 / RFC 3161 test vectors. See "
-            "README.md and PROFILE.md."
+            "Managed-key DSSE and messageSignature / Rekor v2 / RFC 3161 test "
+            "vectors. See README.md and PROFILE.md."
         ),
         "generator": "generate.py",
         "sources": {run: runs[run]["provenance"] for run in runs},
