@@ -4,12 +4,9 @@ Accept and reject vectors for verifying a bundle signed with a managed
 (non-certificate) key, logged in Rekor v2 as a `hashedrekord` 0.0.2 entry and
 timestamped by an RFC 3161 authority. Two content kinds are covered: DSSE
 in-toto statements (`attest-blob`) and blob message signatures
-(`cosign sign-blob`). They cover P-384 and P-256 DSSE signatures, and P-384
-blob signatures, and the binding of each piece of evidence to the signature.
-The statements and artifacts are synthetic. There is no P-256 blob vector:
-only the bundles described under "How the vectors were made" were produced,
-and none of them is a P-256 blob bundle. The P-256 blob path is covered by
-unit tests in the libraries, not by this corpus.
+(`cosign sign-blob`). They cover P-384 and P-256 DSSE signatures, P-384 and
+P-256 blob signatures, and the binding of each piece of evidence to the
+signature. The statements and artifacts are synthetic.
 
 `manifest.json` lists every vector. For each one it records:
 
@@ -38,6 +35,7 @@ key with a Rekor v2 entry and a DSSE envelope.
 | --- | --- |
 | `sources/r1`, `r2`, `r3` | Real DSSE bundles from the pinned Cosign: P-384, a second P-384 key and statement, and P-256. Each comes with the key, the artifact named by the statement subject, the statement and `provenance.json`. |
 | `sources/blob-p384` | Real blob-signature bundle from the pinned Cosign (`sign-blob`): P-384. It comes with the key, the artifact that was signed and `provenance.json`. |
+| `sources/blob-p256b` | Real blob-signature bundle from the pinned Cosign (`sign-blob`): P-256, Rekor v2 index 206171412. It comes with the key, the artifact that was signed and `provenance.json`. |
 | `sources/trusted_root.*.json` | Sigstore production trusted root (TUF snapshot) and staging root; the staging root is used only for its timestamp authority. |
 | `generate.py` | Derives every other file from `sources/`. |
 | `vectors/<id>/bundle.sigstore.json` | The vectors. |
@@ -46,8 +44,6 @@ key with a Rekor v2 entry and a DSSE envelope.
 | `roots/test.json` | Synthetic test logs (see below) plus the production timestamp authority. |
 | `keys/`, `artifacts/` | Verification key and artifact referenced by each vector. |
 
-To add a P-256 blob vector later, add `sources/blob-p256/` from a pinned Cosign
-`sign-blob` run and extend `add_blob_vectors()` in `generate.py`.
 | `check-cosign.py` | Re-checks the recorded Cosign outcomes with a Cosign binary. |
 
 ## How the vectors were made

@@ -215,7 +215,7 @@ fn check_profile(spec: &VectorSpec, vector: &Vector, failures: &mut Vec<String>)
 fn managed_key_corpus() {
     let manifest = manifest();
     let specs = &manifest.vectors;
-    assert_eq!(specs.len(), 50, "unexpected number of corpus vectors");
+    assert_eq!(specs.len(), 56, "unexpected number of corpus vectors");
     let by_id = specs.iter().map(|spec| (spec.id.as_str(), spec)).collect();
     let mut failures = Vec::new();
     for spec in specs {
