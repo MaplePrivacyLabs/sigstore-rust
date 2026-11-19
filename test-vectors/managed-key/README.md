@@ -1,10 +1,15 @@
-# Managed-key DSSE / Rekor v2 / RFC 3161 test vectors
+# Managed-key DSSE / blob / Rekor v2 / RFC 3161 test vectors
 
-Accept and reject vectors for verifying a DSSE in-toto bundle signed with a
-managed (non-certificate) key, logged in Rekor v2 as a `hashedrekord` 0.0.2
-entry and timestamped by an RFC 3161 authority. They cover P-384 and P-256
-signatures and the binding of each piece of evidence to the signature. The
-statements are synthetic.
+Accept and reject vectors for verifying a bundle signed with a managed
+(non-certificate) key, logged in Rekor v2 as a `hashedrekord` 0.0.2 entry and
+timestamped by an RFC 3161 authority. Two content kinds are covered: DSSE
+in-toto statements (`attest-blob`) and blob message signatures
+(`cosign sign-blob`). They cover P-384 and P-256 DSSE signatures, and P-384
+blob signatures, and the binding of each piece of evidence to the signature.
+The statements and artifacts are synthetic. There is no P-256 blob vector:
+only the bundles described under "How the vectors were made" were produced,
+and none of them is a P-256 blob bundle. The P-256 blob path is covered by
+unit tests in the libraries, not by this corpus.
 
 `manifest.json` lists every vector. For each one it records:
 
@@ -31,7 +36,8 @@ key with a Rekor v2 entry and a DSSE envelope.
 
 | Path | Contents |
 | --- | --- |
-| `sources/r1`, `r2`, `r3` | Real bundles from the pinned Cosign: P-384, a second P-384 key and statement, and P-256. Each comes with the key, the artifact named by the statement subject, the statement and `provenance.json`. |
+| `sources/r1`, `r2`, `r3` | Real DSSE bundles from the pinned Cosign: P-384, a second P-384 key and statement, and P-256. Each comes with the key, the artifact named by the statement subject, the statement and `provenance.json`. |
+| `sources/blob-p384` | Real blob-signature bundle from the pinned Cosign (`sign-blob`): P-384. It comes with the key, the artifact that was signed and `provenance.json`. |
 | `sources/trusted_root.*.json` | Sigstore production trusted root (TUF snapshot) and staging root; the staging root is used only for its timestamp authority. |
 | `generate.py` | Derives every other file from `sources/`. |
 | `vectors/<id>/bundle.sigstore.json` | The vectors. |
@@ -39,16 +45,21 @@ key with a Rekor v2 entry and a DSSE envelope.
 | `roots/production-staging-tsa.json` | Production root with the staging timestamp authority: an untrusted-timestamp case. |
 | `roots/test.json` | Synthetic test logs (see below) plus the production timestamp authority. |
 | `keys/`, `artifacts/` | Verification key and artifact referenced by each vector. |
+
+To add a P-256 blob vector later, add `sources/blob-p256/` from a pinned Cosign
+`sign-blob` run and extend `add_blob_vectors()` in `generate.py`.
 | `check-cosign.py` | Re-checks the recorded Cosign outcomes with a Cosign binary. |
 
 ## How the vectors were made
 
 **Positives** (`category: positive`, `source.kind: real`) were produced by real
-tooling: Cosign v3.1.4 `attest-blob` with a throwaway key and an explicit signing
+tooling: Cosign v3.1.4 with a throwaway key and an explicit signing
 configuration naming one Rekor v2 log (`log2025-1.rekor.sigstore.dev`) and
-Sigstore's timestamp authority. Each was accepted by the log and verified by
-Cosign v3.1.4 with `--use-signed-timestamps`. `provenance.json` records the log
-index and time. The throwaway private keys were deleted after signing.
+Sigstore's timestamp authority — `attest-blob` for the DSSE vectors and
+`sign-blob` for the messageSignature vectors. Each was accepted by the log and
+verified by Cosign v3.1.4 with `--use-signed-timestamps`. `provenance.json`
+records the log index and time. The throwaway private keys were deleted after
+signing.
 
 **Negatives** are each one documented mutation of an accepted parent. The test
 checks that the parent is accepted, so the mutation is the only cause of the
@@ -110,6 +121,8 @@ checkpoint-to-log binding on.
 | `integrated-time-present` | the entry has an `integratedTime` member (MK-6) |
 | `inclusion-promise-present` | the entry has an `inclusionPromise` member (MK-6) |
 | `timestamp-count` | there is not exactly one RFC 3161 timestamp (MK-7) |
+| `artifact-mismatch` | the artifact does not match the bundle's declared digest |
+| `message-signature-invalid` | the messageSignature signature does not verify with the verification key |
 | `dsse-signature-invalid` | the DSSE signature does not verify with the verification key |
 | `inclusion-proof-missing` | the entry has no inclusion proof |
 | `inclusion-proof-invalid` | the inclusion proof does not lead to the checkpoint's root hash |

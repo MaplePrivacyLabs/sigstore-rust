@@ -215,7 +215,7 @@ fn check_profile(spec: &VectorSpec, vector: &Vector, failures: &mut Vec<String>)
 fn managed_key_corpus() {
     let manifest = manifest();
     let specs = &manifest.vectors;
-    assert_eq!(specs.len(), 44, "unexpected number of corpus vectors");
+    assert_eq!(specs.len(), 50, "unexpected number of corpus vectors");
     let by_id = specs.iter().map(|spec| (spec.id.as_str(), spec)).collect();
     let mut failures = Vec::new();
     for spec in specs {
@@ -300,9 +300,12 @@ mod profile {
         if material.get("publicKey").is_none() {
             return Err("MK-2");
         }
-        // MK-3: a DSSE envelope with exactly one signature.
-        let signatures = json["dsseEnvelope"]["signatures"].as_array();
-        if signatures.is_none_or(|s| s.len() != 1) {
+        // MK-3: a DSSE envelope with exactly one signature, or a messageSignature.
+        let dsse_ok = json["dsseEnvelope"]["signatures"]
+            .as_array()
+            .is_some_and(|s| s.len() == 1);
+        let blob_ok = json["messageSignature"].is_object();
+        if !dsse_ok && !blob_ok {
             return Err("MK-3");
         }
         // MK-5: exactly one log entry, a Rekor v2 hashedrekord 0.0.2 entry.
