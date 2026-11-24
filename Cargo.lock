@@ -1246,6 +1246,53 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
+name = "maple-sigstore-rekor"
+version = "0.17.0-maple.1"
+dependencies = [
+ "base64 0.23.1",
+ "hex",
+ "jiff",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sigstore-merkle",
+ "sigstore-types",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "maple-sigstore-verify"
+version = "0.17.0-maple.1"
+dependencies = [
+ "base64 0.23.1",
+ "const-oid",
+ "futures",
+ "futures-io",
+ "hex",
+ "jiff",
+ "maple-sigstore-rekor",
+ "regex",
+ "rustls-pki-types",
+ "rustls-webpki",
+ "serde",
+ "serde_json",
+ "serde_json_canonicalizer",
+ "sigstore-bundle",
+ "sigstore-crypto",
+ "sigstore-merkle",
+ "sigstore-trust-root",
+ "sigstore-tsa",
+ "sigstore-types",
+ "thiserror",
+ "tls_codec",
+ "tokio",
+ "tracing",
+ "url",
+ "x509-cert",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2076,11 +2123,11 @@ name = "sigstore-conformance"
 version = "0.17.0"
 dependencies = [
  "hex",
+ "maple-sigstore-verify",
  "sigstore-oidc",
  "sigstore-sign",
  "sigstore-trust-root",
  "sigstore-types",
- "sigstore-verify",
  "tokio",
 ]
 
@@ -2157,9 +2204,9 @@ dependencies = [
 name = "sigstore-protobuf-compat"
 version = "0.17.0"
 dependencies = [
+ "maple-sigstore-rekor",
  "serde",
  "serde_json",
- "sigstore-rekor",
  "sigstore-trust-root",
  "sigstore-types",
  "sigstore_protobuf_specs",
@@ -2176,34 +2223,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "sigstore-rekor"
-version = "0.17.0"
-dependencies = [
- "base64 0.23.1",
- "hex",
- "jiff",
- "reqwest",
- "serde",
- "serde_json",
- "sigstore-merkle",
- "sigstore-types",
- "thiserror",
- "tokio",
-]
-
-[[package]]
 name = "sigstore-sign"
 version = "0.17.0"
 dependencies = [
  "base64 0.23.1",
  "futures-io",
  "hex",
+ "maple-sigstore-rekor",
  "serde_json",
  "sigstore-bundle",
  "sigstore-crypto",
  "sigstore-fulcio",
  "sigstore-oidc",
- "sigstore-rekor",
  "sigstore-trust-root",
  "sigstore-tsa",
  "sigstore-types",
@@ -2281,37 +2312,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
-]
-
-[[package]]
-name = "sigstore-verify"
-version = "0.17.0"
-dependencies = [
- "base64 0.23.1",
- "const-oid",
- "futures",
- "futures-io",
- "hex",
- "jiff",
- "regex",
- "rustls-pki-types",
- "rustls-webpki",
- "serde",
- "serde_json",
- "serde_json_canonicalizer",
- "sigstore-bundle",
- "sigstore-crypto",
- "sigstore-merkle",
- "sigstore-rekor",
- "sigstore-trust-root",
- "sigstore-tsa",
- "sigstore-types",
- "thiserror",
- "tls_codec",
- "tokio",
- "tracing",
- "url",
- "x509-cert",
 ]
 
 [[package]]
