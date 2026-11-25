@@ -93,7 +93,9 @@ then `maple-sigstore-verify`, and nothing else. To release:
 1. Make sure `maple/<release>-publish` is rebuilt on the current head of
    `maple/<release>` and both crates carry the version to release.
 2. Tag that branch head `maple-v<version>`, for example
-   `maple-v0.17.0-maple.1`, and push the tag.
+   `maple-v0.17.0-maple.1`, and push the tag. A repository rule lets only
+   organization admins create, move or delete `maple-v*` tags, because the
+   checks below run from the tagged commit itself.
 3. The `check` job refuses unless the tagged commit is the head of a
    `maple/<release>-publish` branch, exactly one commit on top of
    `maple/<release>`, with manifests that match the tag. It then runs the
