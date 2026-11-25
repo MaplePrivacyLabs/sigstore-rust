@@ -130,9 +130,14 @@ Upstream's own workflows come with every branch, including `release-plz.yml`,
 which releases upstream's crates on a push to `main`. They cannot publish from
 this fork: it holds no repository secret, upstream's crates trust only
 upstream's repository, and the two Maple crates trust only
-`maple-publish.yml` in `maple-crates`. Keep it that way: never name the
-publishing environment `crates-io` (the one `release-plz.yml` uses), and keep
-`release-plz.yml` disabled in this repository's Actions settings.
+`maple-publish.yml` in `maple-crates`.
+
+As a second guard, this repository has an environment named `crates-io`, the
+one `release-plz.yml` asks for, that no branch or tag is allowed to use, so
+that job cannot start here. Keep both guards: never give `crates-io` an
+allowed ref or a secret, and never point a crate's trusted publisher at it.
+GitHub lists `release-plz.yml` under Actions only after a push to `main` has
+run it once; disable it there when it appears.
 
 ## When the fork can go away
 
