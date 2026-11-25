@@ -25,7 +25,7 @@ other crate is unmodified upstream.
 | Branch | Starts from | Holds | Rewritten? |
 | --- | --- | --- | --- |
 | `main` | upstream `main` | A mirror of upstream. Nothing of Maple's. | Fast-forwarded only |
-| `maple/<release>`, for example `maple/0.17` | The upstream release tag | The three changes above, as their own commits, and this file | Never, once something pins a commit on it |
+| `maple/<release>`, for example `maple/0.17` | The upstream release tag | The three changes above, as their own commits, this file, and the publish workflow | Never, once something pins a commit on it |
 | `maple/<release>-publish` | `maple/<release>` | Exactly one commit: the crate renames | Rebuilt whenever `maple/<release>` moves |
 | `upstream/p384-rekor-v2` | upstream `main` | One commit, the P-384 fix alone: the pull request above | Rebased as upstream asks |
 | `maple/p384-rekor-v2`, `maple/p384-rekor-v2-publish` | The 0.16.0 tag | The same work on upstream 0.16.0 | Frozen; see below |
@@ -75,9 +75,64 @@ pins it. Do new work on `maple/<release>`.
    vectors.
 3. Rebuild `maple/<new release>-publish` as one commit on top: the two
    renames, their versions, and the exact pins on the other crates.
-4. `cargo publish --dry-run` both renamed crates, `maple-sigstore-rekor`
-   first, since `maple-sigstore-verify` depends on it.
+4. `cargo publish --dry-run -p maple-sigstore-rekor -p maple-sigstore-verify`:
+   both in one command, since `maple-sigstore-verify` depends on a
+   `maple-sigstore-rekor` that is not in the registry yet.
 5. Update this file's table.
+6. Publish, as described below.
+
+The publish workflow and its script are commits on the Maple branch, so the
+rebase in step 1 carries them to the new release line. Nothing in them names
+a release.
+
+## Publishing to crates.io
+
+`.github/workflows/maple-publish.yml` publishes `maple-sigstore-rekor` and
+then `maple-sigstore-verify`, and nothing else. To release:
+
+1. Make sure `maple/<release>-publish` is rebuilt on the current head of
+   `maple/<release>` and both crates carry the version to release.
+2. Tag that branch head `maple-v<version>`, for example
+   `maple-v0.17.0-maple.1`, and push the tag.
+3. The `check` job refuses unless the tagged commit is the head of a
+   `maple/<release>-publish` branch, exactly one commit on top of
+   `maple/<release>`, with manifests that match the tag. It then runs the
+   workspace tests and a dry run.
+4. The `publish` job waits for a reviewer in the `maple-crates` environment,
+   repeats the check, uploads `maple-sigstore-rekor`, waits until the
+   crates.io index serves it, and uploads `maple-sigstore-verify`.
+
+A rerun is safe. A crate the index already serves at this version is skipped,
+and when both are there the run says so and asks for no approval. To redo a
+release after a fix, rebuild the publish branch with the next build number
+and push a new tag; a published version can never be replaced.
+
+### Credentials
+
+crates.io allows trusted publishing only for a crate that already exists.
+
+- **A crate's first version** is uploaded with an API token held as the
+  `CRATES_BOOTSTRAP_TOKEN` secret of the `maple-crates` environment, never as
+  a repository secret. Scope it to publishing new crates named
+  `maple-sigstore-*`, give it a short expiry, and delete the secret and
+  revoke the token once both crates exist.
+- **Every later version** uses trusted publishing. Each crate needs its own
+  entry on crates.io (crate Settings, Trusted Publishing): repository
+  `MaplePrivacyLabs/sigstore-rust`, workflow `maple-publish.yml`, environment
+  `maple-crates`.
+
+The workflow picks the method from what the index serves; there is nothing to
+select.
+
+### The workflows inherited from upstream
+
+Upstream's own workflows come with every branch, including `release-plz.yml`,
+which releases upstream's crates on a push to `main`. They cannot publish from
+this fork: it holds no repository secret, upstream's crates trust only
+upstream's repository, and the two Maple crates trust only
+`maple-publish.yml` in `maple-crates`. Keep it that way: never name the
+publishing environment `crates-io` (the one `release-plz.yml` uses), and keep
+`release-plz.yml` disabled in this repository's Actions settings.
 
 ## When the fork can go away
 
